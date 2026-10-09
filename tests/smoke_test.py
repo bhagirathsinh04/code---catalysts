@@ -182,6 +182,24 @@ def test_hand_calculated_students_match():
         assert abs(s["placement_readiness"] - ready) < 0.06, sid
 
 
+def test_scoring_doc_matches_config():
+    """docs/scoring.md must quote the real weights and thresholds."""
+    with open(os.path.join(ROOT, "docs", "scoring.md"), encoding="utf-8") as f:
+        doc = f.read()
+    for name, weight in config.WEIGHTS_SUCCESS.items():
+        row = next((l for l in doc.lower().splitlines() if l.startswith(f"| {name} |")), "")
+        assert row.endswith(f"| {round(weight * 100)}% |"), f"weight of {name} is not in the doc"
+    for name in ("THRESHOLD_LOW_SUCCESS", "THRESHOLD_ATTENDANCE", "THRESHOLD_INTERNAL",
+                 "THRESHOLD_BACKLOGS", "THRESHOLD_PLACEMENT_LOW", "CGPA_WEAK", "CGPA_ELIGIBLE",
+                 "PLACEMENT_VERY_LOW", "PLACEMENT_LOW", "TECHNICAL_WEAK", "BACKLOG_PENALTY",
+                 "ATTENDANCE_RECENT_SHARE", "COUNT_CAP_PERCENTILE", "CONFIDENCE_LOW_MISSING",
+                 "CONFIDENCE_MEDIUM_MISSING"):
+        line = f"| `{name}` | {getattr(config, name)} |"
+        assert line in doc, f"docs/scoring.md is out of date for {name}: expected {line!r}"
+    for segment in config.SEGMENTS:
+        assert segment in doc, f"segment missing from the doc: {segment}"
+
+
 if __name__ == "__main__":
     failed = 0
     tests = [(k, v) for k, v in sorted(globals().items()) if k.startswith("test_")]

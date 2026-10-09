@@ -15,6 +15,7 @@ A Student Success Platform that brings attendance, academics, LMS activity, enga
 - Flags students at risk of poor academic performance or poor placement outcomes
 - Groups students into segments for targeted action (for example, strong academics but low placement readiness)
 - Explains which indicators drive each student's score and risk flag
+- Marks students whose data was partly missing, so their results are read with care
 - Lets faculty and administrators filter by branch and semester and open individual student profiles
 
 ## Data
@@ -42,18 +43,26 @@ The raw files are deliberately messy, as real campus data is. `load_data()` in `
 It records every fix in a cleaning log, which the dashboard displays.
 
 ## Student Success Score
-The score is a weighted average of six indicator groups, each scaled to 0-100.
+The score is a weighted average of six indicator groups, each scaled to 0-100. Placement readiness is **not** part of it; it is a separate number used for placement risk.
 
 | Group | Weight |
 |---|---|
-| [Academic] | [30%] |
-| [Attendance] | [20%] |
-| [LMS] | [15%] |
-| [Placement readiness] | [15%] |
-| [Engagement] | [10%] |
-| [Skills] | [10%] |
+| Academic (CGPA, internal marks, backlogs) | 35% |
+| Attendance (overall and last 30 days) | 20% |
+| LMS (assignment completion, logins) | 15% |
+| Engagement (events, clubs, hackathons, certifications) | 10% |
+| Skills (technical, soft) | 10% |
+| Feedback (satisfaction, faculty rating) | 10% |
 
-Copy the real weights from `src/config.py`. Full method: see [docs/scoring.md](docs/scoring.md) [fill later].
+The weights live in `src/config.py`. Full method, worked example and checks: [docs/scoring.md](docs/scoring.md).
+
+## Risk and segments
+Every student gets two separate risk levels, each Low, Medium or High:
+- **Academic risk**: points for a low Success Score, low internal marks, 2+ backlogs, low attendance and a weak CGPA.
+- **Placement risk**: points for low placement readiness, 2+ backlogs, CGPA below 6.0 and weak technical skill.
+
+Stronger warning signs are worth more points, so "High" means the students who need help first (about 13-15% of the class for each risk). Students are also placed in one of five segments, for example "High marks, low placement readiness" or "Attendance & engagement concern", each tied to a suggested action, and each gets a short recommendation. Students whose data was partly filled in are marked with a lower data confidence. The exact rules and cut-offs are in [docs/scoring.md](docs/scoring.md).
+
 
 ## Risk flags
 Fill later, once the backend is final: the score thresholds for High and Medium risk, and how academic risk and placement risk are decided.
@@ -77,7 +86,8 @@ To regenerate the data: `python data/generate_data.py`
 app.py                Streamlit dashboard
 src/config.py         File paths, columns, weights, thresholds
 src/loader.py         Loads, cleans and merges the 8 CSVs
-src/ (other files)    Scoring, risk and segmentation [adjust to the real file names]
+src/backend.py        Success Score, risk levels, segments, recommendations
+tests/smoke_test.py   Checks the backend on the real data (python tests/smoke_test.py)
 data/                 CSV files and the data generator
 docs/scoring.md       Score methodology
 ```

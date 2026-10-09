@@ -643,7 +643,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.caption("**How to use:** set filters in the sidebar. Campus Overview shows who needs help first. "
+st.caption("**How to use:** set filters in the filter bar at the top. Campus Overview shows who needs help first. "
            "Student Explorer opens one student, explains the score and lets you try what-if changes. "
            "Insights & Interventions groups students and exports lists.")
 
@@ -709,7 +709,7 @@ f = df[mask]
 st.caption(f"Showing **{len(f)}** of {len(df)} students")
 
 if f.empty:
-    st.info("No students match these filters. Try widening the filters in the sidebar.")
+    st.info("No students match these filters. Try widening the filters in the filter bar.")
     st.stop()
 
 tab_overview, tab_explorer, tab_insights, tab_trends = st.tabs(
@@ -741,7 +741,7 @@ with tab_overview:
         top["recommended_action"] = top.apply(recommendation_for, axis=1)
         top_cols = [c for c in ["name", "student_id", "department", "success_score", "risk_level",
                                 "why_flagged", "recommended_action"] if c in top.columns]
-        st.caption("High risk first, then lowest success score. Follows the sidebar filters.")
+        st.caption("High risk first, then lowest success score. Follows the filter bar.")
         st.dataframe(style_table(top[top_cols]), hide_index=True)
 
         # ---- falling-attendance watchlist (display only, not part of any score)
@@ -759,7 +759,7 @@ with tab_overview:
                       if c in watch.columns]
         st.caption(f"{len(watch)} students attended {FALLING_DROP}+ points less in the last 30 days "
                    "than overall. Early warning only. This does not change any score. "
-                   "Follows the sidebar filters.")
+                   "Follows the filter bar.")
         st.dataframe(style_table(watch[watch_cols].head(15)), hide_index=True)
         st.download_button("Download watchlist (CSV)",
                            watch[watch_cols].to_csv(index=False).encode("utf-8"),
