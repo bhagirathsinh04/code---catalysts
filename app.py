@@ -562,6 +562,32 @@ def student_summary(df, row, recommendation):
               "It does not replace a teacher's judgement."]
     return "\n".join(lines)
 
+TRACK_STATUSES = ["Not started", "Contacted", "Counselling booked", "In progress", "Resolved"]
+
+
+def tracker_pool(view, n=15):
+    """Flagged students to track: High risk first, then lowest success score."""
+    pool = view[view["risk_level"] != "Low"].copy()
+    pool["_order"] = pool["risk_level"].map({"High": 0, "Medium": 1})
+    return pool.sort_values(["_order", "success_score"]).head(n).drop(columns="_order")
+
+
+def tracker_counts(tracker):
+    """(students with any action, students resolved) from {student_id: status}."""
+    acted = sum(1 for s in tracker.values() if s != "Not started")
+    return acted, sum(1 for s in tracker.values() if s == "Resolved")
+
+
+def set_track_status(student_id):
+    """Selectbox callback: remember the choice in the session-only tracker."""
+    st.session_state.setdefault("tracker", {})[student_id] = st.session_state[f"track_{student_id}"]
+
+
+def clear_tracker():
+    st.session_state["tracker"] = {}
+    for key in [k for k in st.session_state if str(k).startswith("track_")]:
+        del st.session_state[key]
+
 
 PRIMARY = "#2563eb"
 MUTED = "#94a3b8"
@@ -1051,6 +1077,45 @@ with tab_insights:
                            need[cols].to_csv(index=False).encode("utf-8"),
                            file_name="students_needing_attention.csv", mime="text/csv",
                            key="download_attention")
+
+            # ---- intervention tracker (session only: resets on reload)
+    st.divider()
+    st.subheader("Intervention tracker")
+    st.warning("Demo feature: statuses are kept only in this browser session. "
+               "They reset when the page is reloaded or the tab is closed, "
+               "and they are not saved to any file or database.")
+    tracker = st.session_state.setdefault("tracker", {})
+    pool = tracker_pool(f)
+    if pool.empty:
+        st.info("No flagged students in this view.")
+    else:
+        acted, resolved = tracker_counts(tracker)
+        t1, t2, t3 = st.columns(3)
+        kpi(t1, "Students listed below", len(pool), PRIMARY, "highest priority first")
+        kpi(t2, "Action started", acted, "#f0a530", "any status except Not started")
+        kpi(t3, "Resolved", resolved, "#2e9e5b", "marked Resolved")
+        st.caption("Counts include every student you have updated in this session.")
+
+        for _, person in pool.iterrows():
+            sid = person["student_id"]
+            why = ", ".join(lbl for flag, lbl in FLAG_LABELS.items() if person.get(flag) == 1)
+            a, b = st.columns([3, 2])
+            a.markdown(f"**{person['name']}** ({sid}) · {person['risk_level']} risk  \n{why}")
+            current = tracker.get(sid, "Not started")
+            b.selectbox("Status", TRACK_STATUSES, index=TRACK_STATUSES.index(current),
+                        key=f"track_{sid}", label_visibility="collapsed",
+                        on_change=set_track_status, args=(sid,))
+
+        if acted:
+            names = df.set_index("student_id")["name"]
+            export = pd.DataFrame({"student_id": list(tracker.keys()),
+                                   "status": list(tracker.values())})
+            export["name"] = export["student_id"].map(names)
+            export = export[export["status"] != "Not started"][["student_id", "name", "status"]]
+            st.download_button("Download tracker (CSV)", export.to_csv(index=False).encode("utf-8"),
+                               file_name="intervention_tracker.csv", mime="text/csv",
+                               key="download_tracker")
+        st.button("Clear tracker", on_click=clear_tracker)
 
 st.divider()
 st.caption("Scores and risk flags are decision-support indicators based on synthetic demo "
