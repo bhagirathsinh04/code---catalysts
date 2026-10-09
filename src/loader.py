@@ -41,7 +41,7 @@ def _clean_ids(s: pd.Series) -> pd.Series:
     return s.astype(str).str.strip().str.upper()
 
 
-def load_data(return_log: bool = False):
+def load_data(return_log: bool = False, read_table=None):
     log = []
 
     def note(msg):
@@ -49,8 +49,12 @@ def load_data(return_log: bool = False):
 
     raw = {}
     for name in SOURCES:
-        df = pd.read_csv(DATA_DIR / f"{name}.csv")
-        note(f"Loaded {name}.csv: {len(df)} rows")
+        if read_table is None:
+            df = pd.read_csv(DATA_DIR / f"{name}.csv")
+            note(f"Loaded {name}.csv: {len(df)} rows")
+        else:  # e.g. src/db.py passes a function that reads a database table
+            df = read_table(name)
+            note(f"Loaded table {name} from database: {len(df)} rows")
         raw[name] = df
 
     # ---- 1. standardise student IDs, drop duplicates
