@@ -145,8 +145,27 @@ def detect_risks(df):
 
 
 def assign_segments(df):
-    """Add the segment column."""
-    raise NotImplementedError
+    """Add the segment column. The first matching rule wins (order = config.SEGMENTS).
+
+    We tried KMeans first, but this data has no natural clusters (silhouette
+    about 0.18) and the groups only said "high / medium / low overall", so
+    we use plain rules that each lead to a clear action.
+    """
+    out = df.copy()
+    success, ready = _col(out, "success_score"), _col(out, "placement_readiness")
+    attendance = _col(out, "attendance_pct")
+    lms, engagement = _col(out, "score_lms"), _col(out, "score_engagement")
+    academic_high = _col(out, "academic_risk") == "High"
+    names = config.SEGMENTS
+    rules = [
+        academic_high,
+        (success >= config.SEG_GOOD_MARKS) & (ready < config.SEG_LOW_PLACEMENT),
+        (success >= config.SEG_HIGH_SUCCESS) & (ready >= config.SEG_HIGH_PLACEMENT),
+        (attendance < config.THRESHOLD_ATTENDANCE)
+        | ((lms < config.SEG_LOW_LMS) & (engagement < config.SEG_LOW_ENGAGEMENT)),
+    ]
+    out["segment"] = np.select(rules, names[:-1], default=names[-1])
+    return out
 
 
 def get_recommendations(row):

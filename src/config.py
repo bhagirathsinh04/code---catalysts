@@ -82,12 +82,20 @@ RISK_FLAG_COLUMNS = [
     "risk_backlogs", "risk_placement",
 ]
 
+# Segments are assigned in this order: the first rule a student matches wins.
 SEGMENTS = [
-    "High marks, low placement readiness",
-    "Attendance support needed",
-    "Academic support needed",
-    "On track",
+    "Needs intensive academic support",     # academic_risk is High
+    "High marks, low placement readiness",  # SEG_GOOD_MARKS <= success_score and readiness < SEG_LOW_PLACEMENT
+    "Placement-ready high achievers",       # success_score >= SEG_HIGH_SUCCESS and readiness >= SEG_HIGH_PLACEMENT
+    "Attendance & engagement concern",      # low attendance, or low LMS use and low engagement
+    "Steady / on track",                    # everyone else
 ]
+SEG_GOOD_MARKS = 60          # "high marks" for the low-placement segment
+SEG_HIGH_SUCCESS = 65        # success score of a high achiever
+SEG_LOW_PLACEMENT = 45       # placement readiness below this = low
+SEG_HIGH_PLACEMENT = 55      # placement readiness at or above this = ready
+SEG_LOW_LMS = 45             # score_lms below this (together with low engagement)
+SEG_LOW_ENGAGEMENT = 15      # score_engagement below this (together with low LMS)
 
 # ------------------------------------------------------------- scoring details
 BACKLOG_PENALTY = 20            # academic score loses this many points per backlog
