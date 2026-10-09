@@ -4,6 +4,7 @@ This file only DISPLAYS data. Numbers come from:
   src/db.py       -> load_data()                       (M3)
   src/backend.py  -> compute_scores(), detect_risks(),
                      assign_segments(), get_recommendations()   (M1)
+  (the explainable-score helpers live inside this file)
 
 If those are not ready yet, the app shows clearly-labelled DUMMY data,
 and switches to the real data automatically once they work.
@@ -15,18 +16,26 @@ import streamlit as st
 
 st.set_page_config(page_title="CampusPulse", page_icon="🎓", layout="wide")
 
-# ---------------------------------------------------------------- constants
-THRESHOLD_ATTENDANCE = 75
-THRESHOLD_PLACEMENT_LOW = 50
-WEIGHTS_SUCCESS = {"academic": 0.35, "attendance": 0.20, "lms": 0.15,
-                   "engagement": 0.10, "skills": 0.10, "feedback": 0.10}
-try:  # use the team's shared values from src/config.py when they exist
-    import src.config as cfg
-    THRESHOLD_ATTENDANCE = getattr(cfg, "THRESHOLD_ATTENDANCE", THRESHOLD_ATTENDANCE)
-    THRESHOLD_PLACEMENT_LOW = getattr(cfg, "THRESHOLD_PLACEMENT_LOW", THRESHOLD_PLACEMENT_LOW)
-    WEIGHTS_SUCCESS = getattr(cfg, "WEIGHTS_SUCCESS", WEIGHTS_SUCCESS)
+# ---------------------------------------------------------------- shared settings
+try:  # the team's shared values live in src/config.py
+    import src.config as _shared
 except Exception:
-    pass
+    _shared = None
+
+
+def _cfg(name, default):
+    return getattr(_shared, name, default)
+
+
+THRESHOLD_LOW_SUCCESS = _cfg("THRESHOLD_LOW_SUCCESS", 50)
+THRESHOLD_ATTENDANCE = _cfg("THRESHOLD_ATTENDANCE", 75)
+THRESHOLD_INTERNAL = _cfg("THRESHOLD_INTERNAL", 40)
+THRESHOLD_BACKLOGS = _cfg("THRESHOLD_BACKLOGS", 2)
+THRESHOLD_PLACEMENT_LOW = _cfg("THRESHOLD_PLACEMENT_LOW", 50)
+WEIGHTS_SUCCESS = _cfg("WEIGHTS_SUCCESS", {
+    "academic": 0.35, "attendance": 0.20, "lms": 0.15,
+    "engagement": 0.10, "skills": 0.10, "feedback": 0.10,
+})
 
 RISK_ORDER = ["Low", "Medium", "High"]
 RISK_COLORS = {"Low": "#2e9e5b", "Medium": "#f0a530", "High": "#d64545"}
@@ -67,6 +76,159 @@ FLAG_ACTIONS = {
 REQUIRED_COLUMNS = ["student_id", "name", "department", "success_score", "risk_level"]
 
 
+# ---------------------------------------------------------------- explainable score
+# If M1's compute_scores() adds score_academic, score_attendance, score_lms,
+# score_engagement, score_skills, score_feedback (each 0-100), they are used
+# directly, so the chart matches the backend exactly. Otherwise each component
+# is rebuilt from the raw columns below.
+LABELS = {
+    "academic": "Academic",
+    "attendance": "Attendance",
+    "lms": "LMS activity",
+    "engagement": "Engagement",
+    "skills": "Skills",
+    "feedback": "Feedback",
+}
+
+
+# ---------------------------------------------------------------- score parts
+def _pct_of_max(series):
+    """Scale a count column (logins, events...) to 0-100 using the campus maximum."""
+    top = series.max()
+    if pd.isna(top) or top <= 0:
+        return series * np.nan
+    return series / top * 100
+
+
+def _mean_of(parts):
+    if not parts:
+        return None
+    return pd.concat(parts, axis=1).mean(axis=1).clip(0, 100)
+
+
+def component_table(df):
+    """One 0-100 column per score component (NaN when no data exists for it)."""
+    comps = pd.DataFrame(index=df.index)
+    for name in WEIGHTS_SUCCESS:
+        ready = f"score_{name}"
+        if ready in df.columns:  # M1 already computed it
+            comps[name] = df[ready]
+            continue
+
+        parts = []
+        if name == "academic":
+            if "cgpa" in df.columns:
+                parts.append(df["cgpa"] * 10)
+            if "internal_avg" in df.columns:
+                parts.append(df["internal_avg"])
+        elif name == "attendance":
+            if "attendance_pct" in df.columns:
+                parts.append(df["attendance_pct"])
+        elif name == "lms":
+            if "assignment_completion" in df.columns:
+                parts.append(df["assignment_completion"])
+            if "login_count" in df.columns:
+                parts.append(_pct_of_max(df["login_count"]))
+        elif name == "engagement":
+            if "events" in df.columns:
+                parts.append(_pct_of_max(df["events"]))
+            if "certifications" in df.columns:
+                parts.append(_pct_of_max(df["certifications"]))
+        elif name == "skills":
+            if "technical_skill" in df.columns:
+                parts.append(df["technical_skill"])
+            if "soft_skill" in df.columns:
+                parts.append(df["soft_skill"])
+        elif name == "feedback":
+            if "satisfaction" in df.columns:
+                parts.append(df["satisfaction"])
+
+        result = _mean_of(parts)
+        comps[name] = result if result is not None else np.nan
+    return comps
+
+
+def contributions(df):
+    """Points each component adds to the 0-100 Success Score.
+
+    Weights are re-scaled over the components that have data, so a missing
+    component never drags a student down.
+    """
+    weights = pd.Series(WEIGHTS_SUCCESS, dtype=float)
+    weights = weights / weights.sum()
+    comps = component_table(df)[list(weights.index)]
+    available = comps.notna().mul(weights, axis=1).sum(axis=1).replace(0, np.nan)
+    return comps.mul(weights, axis=1).div(available, axis=0)
+
+
+def overall_score(df):
+    """Success Score on a 0-100 scale (used for the dummy data)."""
+    return contributions(df).sum(axis=1, min_count=1).round(1)
+
+
+# ---------------------------------------------------------------- per student
+def driver_table(df, student_id):
+    """Points per component for one student next to the campus average."""
+    contrib = contributions(df)
+    mine = contrib[df["student_id"] == student_id]
+    columns = ["Component", "This student", "Campus average", "Difference"]
+    if mine.empty:
+        return pd.DataFrame(columns=columns)
+    mine = mine.iloc[0]
+    avg = contrib.mean()
+    table = pd.DataFrame({
+        "Component": [LABELS.get(k, k.title()) for k in contrib.columns],
+        "This student": mine.values,
+        "Campus average": avg.values,
+    })
+    table["Difference"] = table["This student"] - table["Campus average"]
+    return table.round(1)
+
+
+def driver_sentence(table):
+    """One plain sentence naming the biggest strength and biggest drag."""
+    t = table.dropna(subset=["This student", "Campus average"])
+    if t.empty:
+        return "Not enough data to explain this score."
+    worst = t.loc[t["Difference"].idxmin()]
+    best = t.loc[t["Difference"].idxmax()]
+    parts = []
+    if worst["Difference"] < -0.5:
+        parts.append(f"Biggest drag: {worst['Component']} "
+                     f"({worst['Difference']:+.1f} points vs campus average).")
+    if best["Difference"] > 0.5:
+        parts.append(f"Biggest strength: {best['Component']} "
+                     f"({best['Difference']:+.1f} points vs campus average).")
+    return " ".join(parts) or "This student is close to the campus average on every component."
+
+
+def risk_table(row):
+    """Each risk rule: the student's value, the rule, and whether it was raised."""
+    rules = [
+        ("Success score", "success_score", "risk_low_success", "below", THRESHOLD_LOW_SUCCESS),
+        ("Attendance %", "attendance_pct", "risk_attendance", "below", THRESHOLD_ATTENDANCE),
+        ("Internal marks", "internal_avg", "risk_internal", "below", THRESHOLD_INTERNAL),
+        ("Backlogs", "backlogs", "risk_backlogs", "at least", THRESHOLD_BACKLOGS),
+        ("Placement readiness", "placement_readiness", "risk_placement", "below",
+         THRESHOLD_PLACEMENT_LOW),
+    ]
+    rows = []
+    for label, col, flag, direction, limit in rules:
+        value = row.get(col, np.nan)
+        if pd.isna(value):
+            shown, result = "N/A", "N/A (no data)"
+        else:
+            shown = f"{round(float(value), 1):g}"
+            if flag in row.index and not pd.isna(row[flag]):
+                raised = row[flag] == 1  # trust the backend's own flag
+            else:
+                raised = value < limit if direction == "below" else value >= limit
+            result = "FLAGGED" if raised else "OK"
+        rows.append({"Check": label, "Student value": shown,
+                     "Rule": f"flag if {direction} {limit}", "Result": result})
+    return pd.DataFrame(rows)
+
+
 # ---------------------------------------------------------------- data
 def make_dummy_data(n=120):
     """Fake students with the same column names as the team contract."""
@@ -94,17 +256,14 @@ def make_dummy_data(n=120):
     })
     df.loc[rng.choice(n, 6, replace=False), "coding"] = np.nan  # a few missing values
 
-    df["success_score"] = (
-        0.35 * df["cgpa"] * 10 + 0.20 * df["attendance_pct"]
-        + 0.15 * df["assignment_completion"] + 0.15 * df["internal_avg"]
-        + 0.15 * df["satisfaction"]
-    ).round(1)
+    # same weights as src/config.py, so the explanation matches the score
+    df["success_score"] = overall_score(df)
     df["placement_readiness"] = df[["coding", "aptitude", "mock_interview"]].mean(axis=1).round(1)
 
-    df["risk_low_success"] = (df["success_score"] < 50).astype(int)
+    df["risk_low_success"] = (df["success_score"] < THRESHOLD_LOW_SUCCESS).astype(int)
     df["risk_attendance"] = (df["attendance_pct"] < THRESHOLD_ATTENDANCE).astype(int)
-    df["risk_internal"] = (df["internal_avg"] < 40).astype(int)
-    df["risk_backlogs"] = (df["backlogs"] >= 2).astype(int)
+    df["risk_internal"] = (df["internal_avg"] < THRESHOLD_INTERNAL).astype(int)
+    df["risk_backlogs"] = (df["backlogs"] >= THRESHOLD_BACKLOGS).astype(int)
     df["risk_placement"] = (df["placement_readiness"] < THRESHOLD_PLACEMENT_LOW).astype(int)
     flags = df[[c for c in df.columns if c.startswith("risk_")]].sum(axis=1)
     df["risk_level"] = np.where(flags == 0, "Low", np.where(flags == 1, "Medium", "High"))
@@ -113,7 +272,7 @@ def make_dummy_data(n=120):
         [
             (df["success_score"] >= 60) & (df["placement_readiness"] < THRESHOLD_PLACEMENT_LOW),
             df["attendance_pct"] < THRESHOLD_ATTENDANCE,
-            df["success_score"] < 50,
+            df["success_score"] < THRESHOLD_LOW_SUCCESS,
         ],
         ["High marks, low placement readiness", "Attendance support needed",
          "Academic support needed"],
@@ -342,6 +501,31 @@ with tab_explorer:
             st.success("No risk flags for this student.")
         st.info(recommendation_for(row))
 
+        # ---- explainable score: what drives this student's score and flags
+        st.divider()
+        st.subheader("Why this score?")
+        drivers = driver_table(df, chosen)
+        if drivers.empty:
+            st.caption("No explanation available for this student.")
+        else:
+            st.markdown(f"**{driver_sentence(drivers)}**")
+            shown = drivers.dropna(subset=["This student", "Campus average"])
+            if not shown.empty:
+                chart_data = shown.melt(id_vars="Component",
+                                        value_vars=["This student", "Campus average"],
+                                        var_name="Who", value_name="Points")
+                fig = px.bar(chart_data, x="Points", y="Component", color="Who",
+                             barmode="group", orientation="h",
+                             title="Points each component adds to the success score")
+                st.plotly_chart(fig)
+            no_data = drivers[drivers["This student"].isna()]["Component"].tolist()
+            if no_data:
+                st.caption("No data for: " + ", ".join(no_data)
+                           + ". The other components are re-weighted to cover this.")
+
+            st.markdown("**Why the risk flags were raised or not**")
+            st.dataframe(risk_table(row), hide_index=True)
+
         bars, missing_labels = [], []
         for label, (col, scale) in INDICATORS.items():
             if col not in df.columns:
@@ -398,6 +582,18 @@ with tab_insights:
                .rename_axis("segment").reset_index(name="students"))
         fig = px.bar(seg, x="students", y="segment", orientation="h",
                      title="Students per segment")
+        st.plotly_chart(fig)
+
+    flag_cols = [c for c in FLAG_LABELS if c in f.columns]
+    if flag_cols:
+        st.divider()
+        st.subheader("Most common risk reasons")
+        reasons = pd.DataFrame({
+            "reason": [FLAG_LABELS[c] for c in flag_cols],
+            "students": [int(f[c].sum()) for c in flag_cols],
+        }).sort_values("students")
+        fig = px.bar(reasons, x="students", y="reason", orientation="h",
+                     title="Students per risk reason (one student can have several)")
         st.plotly_chart(fig)
 
     st.divider()
