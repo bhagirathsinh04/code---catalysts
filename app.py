@@ -896,6 +896,16 @@ with tab_explorer:
             st.success("No risk flags for this student.")
         st.info(recommendation_for(row))
 
+        filled = int(np.nan_to_num(row.get("missing_fields", 0)))
+        no_record = [s for s in ("academic", "attendance", "lms", "engagement",
+                                 "placement", "skills", "feedback")
+                     if not row.get(f"has_{s}", True)]
+        if filled or no_record:
+            msg = f"Data confidence: {filled} value(s) were missing and filled with the branch median."
+            if no_record:
+                msg += " No record in: " + ", ".join(no_record) + "."
+            st.caption(msg + " Read this score with care.")
+
         # ---- what-if simulator
         st.divider()
         st.subheader("What-if simulator")
@@ -1037,6 +1047,12 @@ with tab_insights:
                      & (f["placement_readiness"] < THRESHOLD_PLACEMENT_LOW)).sum())
         insights.append(f"{gap_n} students have good overall scores but low placement "
                         "readiness. Mock interviews and coding practice can help them.")
+
+        if "missing_fields" in f.columns:
+        thin = int((f["missing_fields"] >= 3).sum())
+        if thin:
+            insights.append(f"{thin} students have 3 or more missing values filled with "
+                            "estimates, so their scores are less certain.")
 
     for line in insights:
         st.markdown(f"- {line}")
