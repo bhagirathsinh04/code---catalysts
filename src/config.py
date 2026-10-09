@@ -33,16 +33,43 @@ WEIGHTS_SUCCESS = {
 # Placement readiness = average of these three columns (0-100).
 PLACEMENT_COLUMNS = ["aptitude", "coding", "mock_interview"]
 
-# ------------------------------------------------------------- risk thresholds
-THRESHOLD_LOW_SUCCESS = 50       # success_score below this -> risk_low_success
-THRESHOLD_ATTENDANCE = 75        # attendance_pct below this -> risk_attendance
-THRESHOLD_INTERNAL = 40          # internal_avg below this -> risk_internal
+# ------------------------------------------------------------- risk rules
+# Flags (0/1). Each one marks a single warning sign.
+THRESHOLD_LOW_SUCCESS = 55       # success_score below this -> risk_low_success
+THRESHOLD_ATTENDANCE = 70        # attendance_pct below this -> risk_attendance
+THRESHOLD_INTERNAL = 45          # internal_avg below this -> risk_internal
 THRESHOLD_BACKLOGS = 2           # backlogs at or above this -> risk_backlogs
-THRESHOLD_PLACEMENT_LOW = 50     # placement_readiness below this -> risk_placement
+THRESHOLD_PLACEMENT_LOW = 40     # placement_readiness below this -> risk_placement
 
-# Number of raised flags -> risk_level
-#   0 flags = "Low", 1 flag = "Medium", 2 or more = "High"
+# Risk points. A student collects points for each warning sign; stronger signs
+# are worth more. The total decides Low / Medium / High (separately for
+# academic risk and placement risk).
+ACADEMIC_RISK_POINTS = {
+    "low_success": 2,      # success_score < THRESHOLD_LOW_SUCCESS
+    "low_internal": 2,     # internal_avg < THRESHOLD_INTERNAL
+    "backlogs": 2,         # backlogs >= THRESHOLD_BACKLOGS
+    "low_attendance": 1,   # attendance_pct < THRESHOLD_ATTENDANCE
+    "low_cgpa": 1,         # cgpa < CGPA_WEAK
+}
+CGPA_WEAK = 5.5
+
+PLACEMENT_RISK_POINTS = {
+    "readiness_very_low": 3,  # placement_readiness < PLACEMENT_VERY_LOW
+    "readiness_low": 2,       # PLACEMENT_VERY_LOW <= readiness < PLACEMENT_LOW
+    "backlogs": 1,            # backlogs >= THRESHOLD_BACKLOGS (many firms reject these)
+    "low_cgpa": 1,            # cgpa < CGPA_ELIGIBLE (many firms need 6.0)
+    "weak_technical": 1,      # technical_skill < TECHNICAL_WEAK
+}
+PLACEMENT_VERY_LOW = 35
+PLACEMENT_LOW = 45
+CGPA_ELIGIBLE = 6.0
+TECHNICAL_WEAK = 45
+
+# Points -> level
+RISK_MEDIUM_POINTS = {"academic": 1, "placement": 2}   # at or above -> Medium
+RISK_HIGH_POINTS = {"academic": 4, "placement": 4}     # at or above -> High
 RISK_LEVELS = ["Low", "Medium", "High"]
+# risk_level (the old single column) = the worse of academic_risk and placement_risk.
 
 # ------------------------------------------------------------- final columns
 # Columns the dashboard (app.py) expects after load_data() and the backend run.

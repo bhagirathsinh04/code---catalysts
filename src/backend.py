@@ -81,9 +81,67 @@ def compute_scores(df):
     out["placement_readiness"] = out[place].mean(axis=1).round(1) if place else np.nan
     return out
 
+def _col(df, name):
+    """The column, or an all-NaN Series if the data does not have it."""
+    return df[name] if name in df.columns else pd.Series(np.nan, index=df.index)
+
+
+def _level(points, kind):
+    """Turn risk points into Low / Medium / High."""
+    return pd.Series(
+        np.select([points >= config.RISK_HIGH_POINTS[kind],
+                   points >= config.RISK_MEDIUM_POINTS[kind]],
+                  ["High", "Medium"], default="Low"),
+        index=points.index)
+
+
 def detect_risks(df):
-    """Add the risk_* flag columns and risk_level."""
-    raise NotImplementedError
+    """Add the risk_* flags, academic_risk, placement_risk and risk_level.
+
+    A missing value never raises a flag (NaN < x is False), so a student with
+    missing data is not accused of being at risk; Step 4 marks such students
+    as low-confidence instead.
+    """
+    out = df.copy()
+    success, internal = _col(out, "success_score"), _col(out, "internal_avg")
+    attendance, backlogs = _col(out, "attendance_pct"), _col(out, "backlogs")
+    cgpa, tech = _col(out, "cgpa"), _col(out, "technical_skill")
+    ready = _col(out, "placement_readiness")
+
+    # --- single warning-sign flags (0/1), kept for the dashboard
+    out["risk_low_success"] = (success < config.THRESHOLD_LOW_SUCCESS).astype(int)
+    out["risk_attendance"] = (attendance < config.THRESHOLD_ATTENDANCE).astype(int)
+    out["risk_internal"] = (internal < config.THRESHOLD_INTERNAL).astype(int)
+    out["risk_backlogs"] = (backlogs >= config.THRESHOLD_BACKLOGS).astype(int)
+    out["risk_placement"] = (ready < config.THRESHOLD_PLACEMENT_LOW).astype(int)
+
+    # --- academic risk: points for each warning sign
+    p = config.ACADEMIC_RISK_POINTS
+    out["academic_risk_points"] = (
+        p["low_success"] * out["risk_low_success"]
+        + p["low_internal"] * out["risk_internal"]
+        + p["backlogs"] * out["risk_backlogs"]
+        + p["low_attendance"] * out["risk_attendance"]
+        + p["low_cgpa"] * (cgpa < config.CGPA_WEAK).astype(int))
+    out["academic_risk"] = _level(out["academic_risk_points"], "academic")
+
+    # --- placement risk: readiness first, then eligibility problems
+    q = config.PLACEMENT_RISK_POINTS
+    very_low = ready < config.PLACEMENT_VERY_LOW
+    low = (ready >= config.PLACEMENT_VERY_LOW) & (ready < config.PLACEMENT_LOW)
+    out["placement_risk_points"] = (
+        q["readiness_very_low"] * very_low.astype(int)
+        + q["readiness_low"] * low.astype(int)
+        + q["backlogs"] * out["risk_backlogs"]
+        + q["low_cgpa"] * (cgpa < config.CGPA_ELIGIBLE).astype(int)
+        + q["weak_technical"] * (tech < config.TECHNICAL_WEAK).astype(int))
+    out["placement_risk"] = _level(out["placement_risk_points"], "placement")
+
+    # --- old single column = the worse of the two
+    rank = {name: i for i, name in enumerate(config.RISK_LEVELS)}
+    worst = np.maximum(out["academic_risk"].map(rank), out["placement_risk"].map(rank))
+    out["risk_level"] = worst.map(dict(enumerate(config.RISK_LEVELS)))
+    return out
 
 
 def assign_segments(df):
