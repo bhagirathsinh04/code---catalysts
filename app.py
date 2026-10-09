@@ -760,11 +760,22 @@ with tab_overview:
 
     left, right = st.columns(2)
     with left:
-        fig = px.histogram(f, x="success_score", nbins=20,
+                fig = px.histogram(f, x="success_score", nbins=24,
                            color_discrete_sequence=[PRIMARY],
-                           title="Success score distribution",
-                           labels={"success_score": "Success score"})
-        show(fig)
+                           title="Success score distribution")
+                fig.update_traces(marker_line_color="white", marker_line_width=1.5,
+                          hovertemplate="Score %{x}<br>Students: %{y}<extra></extra>")
+                fig.update_layout(bargap=0.05, showlegend=False,
+                          xaxis_title="Success score", yaxis_title="Students")
+                fig.add_vline(x=THRESHOLD_LOW_SUCCESS, line_dash="dash",
+                      line_color=RISK_COLORS["High"],
+                      annotation_text=f"Risk line ({THRESHOLD_LOW_SUCCESS})",
+                      annotation_position="top left")
+                fig.add_vline(x=f["success_score"].mean(), line_dash="dot",
+                      line_color="#7c3aed",
+                      annotation_text=f"Average {f['success_score'].mean():.1f}",
+                      annotation_position="top right")
+                show(fig)
     with right:
         counts = f.groupby(["department", "risk_level"]).size().reset_index(name="students")
         fig = px.bar(counts, x="department", y="students", color="risk_level",
