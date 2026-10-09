@@ -1,20 +1,44 @@
 """CampusPulse dashboard (M2 - Frontend).
 
 This file only DISPLAYS data. Numbers come from:
-  src/db.py       -> load_data()                       (M3)
+  src/loader.py   -> load_data()  (M3; src/db.py also works)
   src/backend.py  -> compute_scores(), detect_risks(),
                      assign_segments(), get_recommendations()   (M1)
-  (the explainable-score helpers live inside this file)
+  (the explainable-score helpers and a built-in scoring fallback live in this file)
 
-If those are not ready yet, the app shows clearly-labelled DUMMY data,
-and switches to the real data automatically once they work.
+Order of preference: real data + M1's backend, then real data + built-in
+scoring (labelled in the sidebar), then clearly-labelled DUMMY data.
 """
+import html
+import importlib
+
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
 st.set_page_config(page_title="CampusPulse", page_icon="🎓", layout="wide")
+
+st.markdown("""
+<style>
+.block-container {padding-top: 1.4rem; max-width: 1400px;}
+.hero {background: linear-gradient(120deg, #1d4ed8 0%, #6d28d9 100%);
+       border-radius: 16px; padding: 22px 28px; margin-bottom: 18px; color: #ffffff;}
+.hero-title {font-size: 2rem; font-weight: 800; line-height: 1.2;}
+.hero-sub {opacity: 0.92; margin-top: 4px; font-size: 1rem;}
+.pill {display: inline-block; margin-top: 12px; padding: 3px 12px; border-radius: 999px;
+       background: rgba(255,255,255,0.18); border: 1px solid rgba(255,255,255,0.4);
+       font-size: 0.8rem; font-weight: 600;}
+.kpi {background: #ffffff; border: 1px solid #e2e8f0; border-left: 6px solid #2563eb;
+      border-radius: 12px; padding: 14px 16px; margin-bottom: 8px;
+      box-shadow: 0 1px 3px rgba(15, 23, 42, 0.07);}
+.kpi-label {font-size: 0.82rem; color: #64748b; font-weight: 600;}
+.kpi-value {font-size: 1.9rem; font-weight: 800; color: #0f172a; line-height: 1.25;}
+.kpi-value.small {font-size: 1.05rem; line-height: 1.7; padding-top: 6px;}
+.kpi-sub {font-size: 0.78rem; color: #64748b; min-height: 1.1em;}
+.stTabs [data-baseweb="tab"] {font-weight: 600;}
+</style>
+""", unsafe_allow_html=True)
 
 # ---------------------------------------------------------------- shared settings
 try:  # the team's shared values live in src/config.py
@@ -32,10 +56,14 @@ THRESHOLD_ATTENDANCE = _cfg("THRESHOLD_ATTENDANCE", 75)
 THRESHOLD_INTERNAL = _cfg("THRESHOLD_INTERNAL", 40)
 THRESHOLD_BACKLOGS = _cfg("THRESHOLD_BACKLOGS", 2)
 THRESHOLD_PLACEMENT_LOW = _cfg("THRESHOLD_PLACEMENT_LOW", 50)
+PLACEMENT_COLUMNS = _cfg("PLACEMENT_COLUMNS", ["aptitude", "coding", "mock_interview"])
 WEIGHTS_SUCCESS = _cfg("WEIGHTS_SUCCESS", {
     "academic": 0.35, "attendance": 0.20, "lms": 0.15,
     "engagement": 0.10, "skills": 0.10, "feedback": 0.10,
 })
+
+# Academic score loses this many points for every backlog (0 backlogs = 100).
+BACKLOG_PENALTY = _cfg("BACKLOG_PENALTY", 20)
 
 RISK_ORDER = ["Low", "Medium", "High"]
 RISK_COLORS = {"Low": "#2e9e5b", "Medium": "#f0a530", "High": "#d64545"}
@@ -92,6 +120,20 @@ LABELS = {
 
 
 # ---------------------------------------------------------------- score parts
+def _to_100(series):
+    """Bring a rating column onto 0-100 (handles 0-1, 1-5 and 0-10 scales)."""
+    top = series.max()
+    if pd.isna(top):
+        return series
+    if top <= 1:
+        return series * 100
+    if top <= 5:
+        return series * 20
+    if top <= 10:
+        return series * 10
+    return series
+
+
 def _pct_of_max(series):
     """Scale a count column (logins, events...) to 0-100 using the campus maximum."""
     top = series.max()
@@ -120,13 +162,15 @@ def component_table(df):
             if "cgpa" in df.columns:
                 parts.append(df["cgpa"] * 10)
             if "internal_avg" in df.columns:
-                parts.append(df["internal_avg"])
+                parts.append(_to_100(df["internal_avg"]))
+            if "backlogs" in df.columns:  # 0 backlogs = 100, minus BACKLOG_PENALTY each
+                parts.append((100 - df["backlogs"] * BACKLOG_PENALTY).clip(0, 100))
         elif name == "attendance":
             if "attendance_pct" in df.columns:
-                parts.append(df["attendance_pct"])
+                parts.append(_to_100(df["attendance_pct"]))
         elif name == "lms":
             if "assignment_completion" in df.columns:
-                parts.append(df["assignment_completion"])
+                parts.append(_to_100(df["assignment_completion"]))
             if "login_count" in df.columns:
                 parts.append(_pct_of_max(df["login_count"]))
         elif name == "engagement":
@@ -136,12 +180,12 @@ def component_table(df):
                 parts.append(_pct_of_max(df["certifications"]))
         elif name == "skills":
             if "technical_skill" in df.columns:
-                parts.append(df["technical_skill"])
+                parts.append(_to_100(df["technical_skill"]))
             if "soft_skill" in df.columns:
-                parts.append(df["soft_skill"])
+                parts.append(_to_100(df["soft_skill"]))
         elif name == "feedback":
             if "satisfaction" in df.columns:
-                parts.append(df["satisfaction"])
+                parts.append(_to_100(df["satisfaction"]))
 
         result = _mean_of(parts)
         comps[name] = result if result is not None else np.nan
@@ -260,19 +304,27 @@ def make_dummy_data(n=120):
     df["success_score"] = overall_score(df)
     df["placement_readiness"] = df[["coding", "aptitude", "mock_interview"]].mean(axis=1).round(1)
 
-    df["risk_low_success"] = (df["success_score"] < THRESHOLD_LOW_SUCCESS).astype(int)
-    df["risk_attendance"] = (df["attendance_pct"] < THRESHOLD_ATTENDANCE).astype(int)
-    df["risk_internal"] = (df["internal_avg"] < THRESHOLD_INTERNAL).astype(int)
-    df["risk_backlogs"] = (df["backlogs"] >= THRESHOLD_BACKLOGS).astype(int)
-    df["risk_placement"] = (df["placement_readiness"] < THRESHOLD_PLACEMENT_LOW).astype(int)
-    flags = df[[c for c in df.columns if c.startswith("risk_")]].sum(axis=1)
+    return add_risk_flags(df)
+
+
+def add_risk_flags(df):
+    """Risk flags, risk level and segment from the shared thresholds."""
+    def col(name):
+        return df[name] if name in df.columns else pd.Series(np.nan, index=df.index)
+
+    df["risk_low_success"] = (col("success_score") < THRESHOLD_LOW_SUCCESS).astype(int)
+    df["risk_attendance"] = (col("attendance_pct") < THRESHOLD_ATTENDANCE).astype(int)
+    df["risk_internal"] = (col("internal_avg") < THRESHOLD_INTERNAL).astype(int)
+    df["risk_backlogs"] = (col("backlogs") >= THRESHOLD_BACKLOGS).astype(int)
+    df["risk_placement"] = (col("placement_readiness") < THRESHOLD_PLACEMENT_LOW).astype(int)
+    flags = df[list(FLAG_LABELS)].sum(axis=1)
     df["risk_level"] = np.where(flags == 0, "Low", np.where(flags == 1, "Medium", "High"))
 
     df["segment"] = np.select(
         [
-            (df["success_score"] >= 60) & (df["placement_readiness"] < THRESHOLD_PLACEMENT_LOW),
-            df["attendance_pct"] < THRESHOLD_ATTENDANCE,
-            df["success_score"] < THRESHOLD_LOW_SUCCESS,
+            (col("success_score") >= 60) & (col("placement_readiness") < THRESHOLD_PLACEMENT_LOW),
+            col("attendance_pct") < THRESHOLD_ATTENDANCE,
+            col("success_score") < THRESHOLD_LOW_SUCCESS,
         ],
         ["High marks, low placement readiness", "Attendance support needed",
          "Academic support needed"],
@@ -281,19 +333,67 @@ def make_dummy_data(n=120):
     return df
 
 
+def built_in_backend(df):
+    """Scores, flags and segments from src/config.py (used until src/backend.py works)."""
+    df = df.copy().reset_index(drop=True)
+    df["success_score"] = overall_score(df)
+    place = [c for c in PLACEMENT_COLUMNS if c in df.columns]
+    df["placement_readiness"] = df[place].mean(axis=1).round(1) if place else np.nan
+    return add_risk_flags(df)
+
+
+def find_loader():
+    """Use M3's load_data(), whichever file it lives in."""
+    errors = []
+    for module_name in ("src.db", "src.loader"):
+        try:
+            return importlib.import_module(module_name).load_data
+        except Exception as e:
+            errors.append(f"{module_name}: {e!r}")
+    raise ImportError("; ".join(errors))
+
+
+COLUMN_RENAMES = {
+    "branch": "department",
+    "avg_internal_marks": "internal_avg",
+    "overall_attendance_pct": "attendance_pct",
+    "logins_per_week": "login_count",
+    "assignment_completion_pct": "assignment_completion",
+    "events_attended": "events",
+    "aptitude_score": "aptitude",
+    "coding_score": "coding",
+    "mock_interview_score": "mock_interview",
+    "technical_score": "technical_skill",
+    "softskill_score": "soft_skill",
+    "satisfaction_score": "satisfaction",
+}
+
+
+def standardise_columns(df):
+    """Translate M3's column names into the names the dashboard uses."""
+    df = df.rename(columns=COLUMN_RENAMES)
+    if "year" not in df.columns and "semester" in df.columns:
+        df["year"] = ((df["semester"] + 1) // 2).astype(int)  # sem 3,5,7 -> year 2,3,4
+    return df
+
+
 @st.cache_data
 def load_dashboard_data():
-    """Real pipeline if ready, otherwise dummy data. Returns (df, source, error)."""
+    """Returns (df, source, note). source is real, partial or dummy."""
     try:
-        from src.db import load_data
+        df = standardise_columns(find_loader()().reset_index(drop=True))
+    except Exception as e:  # data not ready -> show dummy data, but say so loudly
+        return make_dummy_data(), "dummy", repr(e)
+    try:
         from src.backend import compute_scores, detect_risks, assign_segments
 
-        df = load_data()
-        df = compute_scores(df)
-        df = detect_risks(df)
-        df = assign_segments(df)
+        df = assign_segments(detect_risks(compute_scores(df)))
         return df, "real", ""
-    except Exception as e:  # not ready yet -> show dummy data, but say so loudly
+    except Exception as e:  # M1's backend not ready -> use the built-in scoring
+        backend_note = repr(e)
+    try:
+        return built_in_backend(df), "partial", backend_note
+    except Exception as e:
         return make_dummy_data(), "dummy", repr(e)
 
 
@@ -330,10 +430,30 @@ def style_table(frame):
     return styler
 
 
-def kpi(column, label, value):
-    """A bordered KPI card."""
-    with column.container(border=True):
-        st.metric(label, value)
+PRIMARY = "#2563eb"
+MUTED = "#94a3b8"
+WHO_COLORS = {"This student": PRIMARY, "Campus average": MUTED}
+
+
+def kpi(column, label, value, accent=PRIMARY, sub="", small=False):
+    """A styled KPI card."""
+    size = " small" if small else ""
+    column.markdown(
+        f'<div class="kpi" style="border-left-color:{accent}">'
+        f'<div class="kpi-label">{html.escape(str(label))}</div>'
+        f'<div class="kpi-value{size}">{html.escape(str(value))}</div>'
+        f'<div class="kpi-sub">{html.escape(str(sub))}</div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def show(fig):
+    """Draw a chart with the same clean style everywhere."""
+    fig.update_layout(template="plotly_white", legend_title_text="",
+                      margin=dict(l=10, r=10, t=50, b=10),
+                      font=dict(family="Segoe UI, Inter, sans-serif"),
+                      title_font_size=16)
+    st.plotly_chart(fig)
 
 
 # ---------------------------------------------------------------- load
@@ -345,8 +465,15 @@ if missing:
              "Check src/config.py with the team.")
     st.stop()
 
-st.title("🎓 CampusPulse")
-st.caption("Student Success Intelligence Platform: see who needs help, why, and what to do next.")
+SOURCE_PILL = {"real": "Live data", "partial": "Real data · built-in scoring",
+               "dummy": "Demo data"}
+st.markdown(
+    '<div class="hero"><div class="hero-title">🎓 CampusPulse</div>'
+    '<div class="hero-sub">Student Success Intelligence Platform: see who needs help, '
+    'why, and what to do next.</div>'
+    f'<span class="pill">{SOURCE_PILL[source]}</span></div>',
+    unsafe_allow_html=True,
+)
 
 # ---------------------------------------------------------------- sidebar
 st.sidebar.header("Filters")
@@ -354,8 +481,19 @@ if source == "dummy":
     st.sidebar.warning("Showing DUMMY data. The real data and backend are not connected yet.")
     with st.sidebar.expander("Why is it dummy?"):
         st.code(load_error)
+elif source == "partial":
+    st.sidebar.info("Real student data. Scores use the built-in scoring until "
+                    "src/backend.py is ready.")
+    with st.sidebar.expander("Why built-in scoring?"):
+        st.code(load_error)
 else:
     st.sidebar.success("Connected to real data")
+
+if source != "dummy":
+    with st.sidebar.expander("Data check"):
+        st.caption(f"{len(df)} students, {df.shape[1]} columns. "
+                   "Check that each min and max looks right.")
+        st.dataframe(df.select_dtypes("number").agg(["min", "max"]).T.round(1))
 
 departments = sorted(df["department"].dropna().unique().tolist())
 sel_depts = st.sidebar.multiselect("Department", departments, default=departments)
@@ -389,11 +527,14 @@ tab_overview, tab_explorer, tab_insights = st.tabs(
 # ---------------------------------------------------------------- tab 1
 with tab_overview:
     c1, c2, c3, c4 = st.columns(4)
-    kpi(c1, "Total students", len(f))
-    kpi(c2, "Average success score", na(f["success_score"].mean()))
-    kpi(c3, "High-risk students", int((f["risk_level"] == "High").sum()))
+    high_n_view = int((f["risk_level"] == "High").sum())
     placement_avg = f["placement_readiness"].mean() if "placement_readiness" in f.columns else np.nan
-    kpi(c4, "Avg placement readiness", na(placement_avg))
+    kpi(c1, "Total students", len(f), PRIMARY, f"of {len(df)} on campus")
+    kpi(c2, "Average success score", na(f["success_score"].mean()), "#7c3aed", "scale 0 to 100")
+    kpi(c3, "High-risk students", high_n_view, RISK_COLORS["High"],
+        f"{high_n_view / len(f):.0%} of this view")
+    kpi(c4, "Avg placement readiness", na(placement_avg), "#0d9488",
+        "aptitude, coding, mock interview")
 
     with st.expander("How is the Success Score calculated?"):
         weights = pd.DataFrame({
@@ -407,16 +548,17 @@ with tab_overview:
     left, right = st.columns(2)
     with left:
         fig = px.histogram(f, x="success_score", nbins=20,
+                           color_discrete_sequence=[PRIMARY],
                            title="Success score distribution",
                            labels={"success_score": "Success score"})
-        st.plotly_chart(fig)
+        show(fig)
     with right:
         counts = f.groupby(["department", "risk_level"]).size().reset_index(name="students")
         fig = px.bar(counts, x="department", y="students", color="risk_level",
                      color_discrete_map=RISK_COLORS,
                      category_orders={"risk_level": RISK_ORDER},
                      title="Risk level by department")
-        st.plotly_chart(fig)
+        show(fig)
 
     if "attendance_pct" in f.columns:
         fig = px.scatter(f, x="attendance_pct", y="success_score", color="risk_level",
@@ -426,7 +568,7 @@ with tab_overview:
                          title="Attendance vs success score",
                          labels={"attendance_pct": "Attendance %",
                                  "success_score": "Success score"})
-        st.plotly_chart(fig)
+        show(fig)
 
 # ---------------------------------------------------------------- tab 2
 with tab_explorer:
@@ -483,16 +625,24 @@ with tab_explorer:
         campus_avg = df["success_score"].mean()
         delta = None if pd.isna(row["success_score"]) else f"{row['success_score'] - campus_avg:+.1f} vs campus average"
 
+        year_text = ""
+        if "year" in row.index and not pd.isna(row["year"]):
+            try:
+                year_text = f" · Year {int(row['year'])}"
+            except (TypeError, ValueError):
+                year_text = f" · {row['year']}"
+        st.markdown(f"**{row['name']}** · {row['department']}{year_text}")
+
+        n_flags = sum(row.get(c) == 1 for c in FLAG_LABELS)
         m1, m2, m3, m4 = st.columns(4)
-        with m1.container(border=True):
-            st.metric("Success score", na(row["success_score"]), delta=delta)
-        with m2.container(border=True):
-            st.metric("Placement readiness",
-                      na(row["placement_readiness"]) if "placement_readiness" in row.index else "N/A")
-        with m3.container(border=True):
-            st.metric("Risk level", str(row["risk_level"]))
-        with m4.container(border=True):
-            st.metric("Segment", str(row["segment"]) if "segment" in row.index else "N/A")
+        kpi(m1, "Success score", na(row["success_score"]), "#7c3aed", delta or "")
+        kpi(m2, "Placement readiness",
+            na(row["placement_readiness"]) if "placement_readiness" in row.index else "N/A",
+            "#0d9488", "aptitude, coding, mock interview")
+        kpi(m3, "Risk level", str(row["risk_level"]),
+            RISK_COLORS.get(str(row["risk_level"]), "#64748b"), f"{n_flags} risk flag(s) raised")
+        kpi(m4, "Segment", str(row["segment"]) if "segment" in row.index else "N/A",
+            PRIMARY, "group for targeted action", small=True)
 
         raised = [label for flag, label in FLAG_LABELS.items() if row.get(flag) == 1]
         if raised:
@@ -516,8 +666,9 @@ with tab_explorer:
                                         var_name="Who", value_name="Points")
                 fig = px.bar(chart_data, x="Points", y="Component", color="Who",
                              barmode="group", orientation="h",
+                             color_discrete_map=WHO_COLORS,
                              title="Points each component adds to the success score")
-                st.plotly_chart(fig)
+                show(fig)
             no_data = drivers[drivers["This student"].isna()]["Component"].tolist()
             if no_data:
                 st.caption("No data for: " + ", ".join(no_data)
@@ -538,8 +689,9 @@ with tab_explorer:
                          "Value": df[col].mean() * scale})
         if bars:
             fig = px.bar(pd.DataFrame(bars), x="Indicator", y="Value", color="Who",
-                         barmode="group", title="This student vs campus average")
-            st.plotly_chart(fig)
+                         barmode="group", color_discrete_map=WHO_COLORS,
+                         title="This student vs campus average")
+            show(fig)
         if missing_labels:
             st.caption("N/A (not available): " + ", ".join(missing_labels))
 
@@ -581,8 +733,8 @@ with tab_insights:
         seg = (f["segment"].fillna("Unassigned").value_counts()
                .rename_axis("segment").reset_index(name="students"))
         fig = px.bar(seg, x="students", y="segment", orientation="h",
-                     title="Students per segment")
-        st.plotly_chart(fig)
+                     color_discrete_sequence=[PRIMARY], title="Students per segment")
+        show(fig)
 
     flag_cols = [c for c in FLAG_LABELS if c in f.columns]
     if flag_cols:
@@ -593,8 +745,9 @@ with tab_insights:
             "students": [int(f[c].sum()) for c in flag_cols],
         }).sort_values("students")
         fig = px.bar(reasons, x="students", y="reason", orientation="h",
+                     color_discrete_sequence=[PRIMARY],
                      title="Students per risk reason (one student can have several)")
-        st.plotly_chart(fig)
+        show(fig)
 
     st.divider()
     st.subheader("Students needing attention")
