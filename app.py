@@ -6,7 +6,7 @@ This file only DISPLAYS data. Numbers come from:
                      assign_segments(), get_recommendations()   (M1)
   (the explainable-score helpers and a built-in scoring fallback live in this file)
 
-Order of preference: real data + M1's backend, then real data + built-in
+Order of preference: real data + the backend, then clearly-labelled DUMMY data.
 scoring (labelled in the sidebar), then clearly-labelled DUMMY data.
 """
 import html
@@ -205,13 +205,14 @@ def contributions(df):
     return comps.mul(weights, axis=1).div(available, axis=0)
 
 
-def overall_score(df):
-    """Success Score: uses src/backend.py when ready, else the old built-in rule."""
-    try:
-        from src.backend import compute_scores
-        return compute_scores(df)["success_score"]
-    except (ImportError, NotImplementedError):
-        return contributions(df).sum(axis=1, min_count=1).round(1)
+def run_backend(df):
+    """The ONE place the scoring pipeline runs: scores -> risks -> segments.
+
+    The dashboard, the what-if simulator and the campus box all call this,
+    so they can never disagree with src/backend.py.
+    """
+    from src.backend import compute_scores, detect_risks, assign_segments
+    return assign_segments(detect_risks(compute_scores(df)))
 
 
 # ---------------------------------------------------------------- per student
@@ -285,17 +286,15 @@ def color_result(value):
 def simulate(df, student_id, changes):
     """Re-score ONE student with edited values (what-if). Nothing is saved.
 
-    The edited row is put back into the full table before scoring, so campus
-    maximums (logins, events...) stay the same and the numbers match the app.
+    The edited row is put back into the full table and the real backend runs
+    on the whole table, so campus-wide scaling (logins, events...) stays the
+    same and the numbers match the rest of the app.
     """
-    sim = df.drop(columns=[c for c in df.columns if c.startswith("score_")]).copy()
+    sim = df.copy()
     idx = sim.index[sim["student_id"] == student_id][0]
     for col, value in changes.items():
         sim.loc[idx, col] = value
-    sim["success_score"] = overall_score(sim)
-    place = [c for c in PLACEMENT_COLUMNS if c in sim.columns]
-    sim["placement_readiness"] = sim[place].mean(axis=1).round(1) if place else np.nan
-    return add_risk_flags(sim).loc[idx]
+    return run_backend(sim).loc[idx]
 
 
 # ---------------------------------------------------------------- data
@@ -325,51 +324,7 @@ def make_dummy_data(n=120):
     })
     df.loc[rng.choice(n, 6, replace=False), "coding"] = np.nan  # a few missing values
 
-    # same weights as src/config.py, so the explanation matches the score
-    df["success_score"] = overall_score(df)
-    df["placement_readiness"] = df[["coding", "aptitude", "mock_interview"]].mean(axis=1).round(1)
-
-    return add_risk_flags(df)
-
-
-def add_risk_flags(df):
-    """Risk flags, risk level and segment from the shared thresholds."""
-    def col(name):
-        return df[name] if name in df.columns else pd.Series(np.nan, index=df.index)
-
-    df["risk_low_success"] = (col("success_score") < THRESHOLD_LOW_SUCCESS).astype(int)
-    df["risk_attendance"] = (col("attendance_pct") < THRESHOLD_ATTENDANCE).astype(int)
-    df["risk_internal"] = (col("internal_avg") < THRESHOLD_INTERNAL).astype(int)
-    df["risk_backlogs"] = (col("backlogs") >= THRESHOLD_BACKLOGS).astype(int)
-    df["risk_placement"] = (col("placement_readiness") < THRESHOLD_PLACEMENT_LOW).astype(int)
-    flags = df[list(FLAG_LABELS)].sum(axis=1)
-    df["risk_level"] = np.where(flags == 0, "Low", np.where(flags == 1, "Medium", "High"))
-
-    df["segment"] = np.select(
-        [
-            (col("success_score") >= 60) & (col("placement_readiness") < THRESHOLD_PLACEMENT_LOW),
-            col("attendance_pct") < THRESHOLD_ATTENDANCE,
-            col("success_score") < THRESHOLD_LOW_SUCCESS,
-        ],
-        ["High marks, low placement readiness", "Attendance support needed",
-         "Academic support needed"],
-        default="On track",
-    )
-    return df
-
-
-def built_in_backend(df):
-    """Scores from src/backend.py when ready; risk flags and segments from this file."""
-    df = df.copy().reset_index(drop=True)
-    try:
-        from src.backend import compute_scores
-        df = compute_scores(df)
-    except (ImportError, NotImplementedError):
-        df["success_score"] = overall_score(df)
-        place = [c for c in PLACEMENT_COLUMNS if c in df.columns]
-        df["placement_readiness"] = df[place].mean(axis=1).round(1) if place else np.nan
-    return add_risk_flags(df)
-
+    return run_backend(df)  # same scoring, risks and segments as the real data
 
 def find_loader():
     """Use M3's load_data(), whichever file it lives in."""
@@ -408,23 +363,16 @@ def standardise_columns(df):
 
 @st.cache_data
 def load_dashboard_data():
-    """Returns (df, source, note). source is real, partial or dummy."""
+    """Returns (df, source, note). source is real or dummy."""
     try:
         df = standardise_columns(find_loader()().reset_index(drop=True))
     except Exception as e:  # data not ready -> show dummy data, but say so loudly
         return make_dummy_data(), "dummy", repr(e)
-    try:
-        from src.backend import compute_scores, detect_risks, assign_segments
 
-        df = assign_segments(detect_risks(compute_scores(df)))
-        return df, "real", ""
-    except Exception as e:  # M1's backend not ready -> use the built-in scoring
-        backend_note = repr(e)
     try:
-        return built_in_backend(df), "partial", backend_note
-    except Exception as e:
+        return run_backend(df), "real", ""
+    except Exception as e:  # the backend failed -> dummy data, but say so loudly
         return make_dummy_data(), "dummy", repr(e)
-
 
 @st.cache_data
 def load_cleaning_log():
@@ -487,20 +435,13 @@ def campus_intervention(frame_all, view, target):
     if "attendance_pct" not in frame_all.columns or "risk_attendance" not in view.columns:
         return None
     ids = view.loc[(view["risk_level"] == "High") & (view["risk_attendance"] == 1), "student_id"]
-    base = frame_all.drop(columns=[c for c in frame_all.columns if c.startswith("score_")]).copy()
 
-    def rescore(table):
-        table = table.copy()
-        table["success_score"] = overall_score(table)
-        place = [c for c in PLACEMENT_COLUMNS if c in table.columns]
-        table["placement_readiness"] = table[place].mean(axis=1).round(1) if place else np.nan
-        return add_risk_flags(table)
-
-    before = rescore(base)
+    base = frame_all.copy()
+    before = run_backend(base)
     changed = base.copy()
     hit = changed["student_id"].isin(ids)
     changed.loc[hit, "attendance_pct"] = changed.loc[hit, "attendance_pct"].clip(lower=target)
-    after = rescore(changed)
+    after = run_backend(changed)
     in_view = before["student_id"].isin(view["student_id"])
     return {
         "n": int(hit.sum()),
@@ -633,8 +574,7 @@ if missing:
              "Check src/config.py with the team.")
     st.stop()
 
-SOURCE_PILL = {"real": "Live data", "partial": "Real data · built-in scoring",
-               "dummy": "Demo data"}
+SOURCE_PILL = {"real": "Live data", "dummy": "Demo data"}
 st.markdown(
     '<div class="hero"><div class="hero-title">🎓 CampusPulse</div>'
     '<div class="hero-sub">Student Success Intelligence Platform: see who needs help, '
@@ -653,11 +593,7 @@ if source == "dummy":
     st.sidebar.warning("Showing DUMMY data. The real data and backend are not connected yet.")
     with st.sidebar.expander("Why is it dummy?"):
         st.code(load_error)
-elif source == "partial":
-    st.sidebar.info("Real student data. Scores use the built-in scoring until "
-                    "src/backend.py is ready.")
-    with st.sidebar.expander("Why built-in scoring?"):
-        st.code(load_error)
+
 else:
     st.sidebar.success("Connected to real data")
 
