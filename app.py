@@ -305,7 +305,7 @@ def make_dummy_data(n=120):
     df = pd.DataFrame({
         "student_id": [f"STU{i:03d}" for i in range(1, n + 1)],
         "name": [f"Student {i}" for i in range(1, n + 1)],
-        "department": rng.choice(["CSE", "ICT", "IT"], n),
+        "department": rng.choice(["CSE", "IT", "ECE", "MECH"], n),
         "year": rng.choice([1, 2, 3, 4], n),
         "cgpa": rng.normal(7.2, 1.0, n).clip(4, 10).round(2),
         "internal_avg": score(65, 14),
@@ -704,12 +704,12 @@ if f.empty:
     st.info("No students match these filters. Try widening the filters in the sidebar.")
     st.stop()
 
-tab_overview, tab_explorer, tab_insights = st.tabs(
+tab_overview, tab_explorer, tab_insights, tab_trends = st.tabs(
     ["Campus Overview", "Student Explorer", "Insights & Interventions", "Trends"]
 )
 
 # ---------------------------------------------------------------- tab 1
-with tab_overview:
+with tab_overview: 
     c1, c2, c3, c4 = st.columns(4)
     high_n_view = int((f["risk_level"] == "High").sum())
     placement_avg = f["placement_readiness"].mean() if "placement_readiness" in f.columns else np.nan
@@ -1048,11 +1048,11 @@ with tab_insights:
         insights.append(f"{gap_n} students have good overall scores but low placement "
                         "readiness. Mock interviews and coding practice can help them.")
 
-        if "missing_fields" in f.columns:
+    if "missing_fields" in f.columns:
         thin = int((f["missing_fields"] >= 3).sum())
-        if thin:
-            insights.append(f"{thin} students have 3 or more missing values filled with "
-                            "estimates, so their scores are less certain.")
+    if thin:
+        insights.append(f"{thin} students have 3 or more missing values filled with "
+        "estimates, so their scores are less certain.")
 
     for line in insights:
         st.markdown(f"- {line}")
