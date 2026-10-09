@@ -473,6 +473,37 @@ def falling_attendance(frame, drop=FALLING_DROP):
     out = out[out["attendance_drop"] >= drop]
     return out.sort_values("attendance_drop", ascending=False)
 
+def campus_intervention(frame_all, view, target):
+    """What if every high-risk, low-attendance student in `view` reached `target`% attendance?
+    Re-scores a COPY of the whole table (same rules as simulate()). Nothing stored changes."""
+    if "attendance_pct" not in frame_all.columns or "risk_attendance" not in view.columns:
+        return None
+    ids = view.loc[(view["risk_level"] == "High") & (view["risk_attendance"] == 1), "student_id"]
+    base = frame_all.drop(columns=[c for c in frame_all.columns if c.startswith("score_")]).copy()
+
+    def rescore(table):
+        table = table.copy()
+        table["success_score"] = overall_score(table)
+        place = [c for c in PLACEMENT_COLUMNS if c in table.columns]
+        table["placement_readiness"] = table[place].mean(axis=1).round(1) if place else np.nan
+        return add_risk_flags(table)
+
+    before = rescore(base)
+    changed = base.copy()
+    hit = changed["student_id"].isin(ids)
+    changed.loc[hit, "attendance_pct"] = changed.loc[hit, "attendance_pct"].clip(lower=target)
+    after = rescore(changed)
+    in_view = before["student_id"].isin(view["student_id"])
+    return {
+        "n": int(hit.sum()),
+        "high_before": int((before.loc[in_view, "risk_level"] == "High").sum()),
+        "high_after": int((after.loc[in_view, "risk_level"] == "High").sum()),
+        "score_gain": float((after.loc[hit, "success_score"] - before.loc[hit, "success_score"]).mean())
+                      if hit.any() else 0.0,
+        "freed": int(((before.loc[hit, "risk_level"] == "High")
+                      & (after.loc[hit, "risk_level"] != "High")).sum()),
+    }
+
 
 PRIMARY = "#2563eb"
 MUTED = "#94a3b8"
@@ -880,6 +911,31 @@ with tab_insights:
 
     for line in insights:
         st.markdown(f"- {line}")
+
+            # ---- campus-level "what if we intervene" (display only, nothing is saved)
+    st.divider()
+    st.subheader("What if we intervene?")
+    st.caption("Takes every high-risk student with low attendance in the current view and "
+               "imagines they reach the target below. The scores are recalculated on a copy. "
+               "Nothing is saved.")
+    target = st.slider("Target attendance %", int(THRESHOLD_ATTENDANCE), 100,
+                       int(THRESHOLD_ATTENDANCE), key="campus_target")
+    result = campus_intervention(df, f, target)
+    if result is None:
+        st.caption("Attendance data is not available, so this box is hidden.")
+    elif result["n"] == 0:
+        st.info("No high-risk students with low attendance in this view.")
+    else:
+        i1, i2, i3 = st.columns(3)
+        kpi(i1, "Students targeted", result["n"], PRIMARY, "high risk + low attendance")
+        kpi(i2, "High-risk students", f"{result['high_before']} → {result['high_after']}",
+            RISK_COLORS["High"], f"{result['freed']} would leave High")
+        kpi(i3, "Avg success score gain", f"{result['score_gain']:+.1f}", "#7c3aed",
+            "for the targeted students")
+        st.success(f"If the {result['n']} high-risk students with low attendance reach {target}%, "
+                   f"high-risk drops from {result['high_before']} to {result['high_after']}.")
+        st.caption("Fixing attendance removes one flag, so most of them move from High to Medium. "
+                   "They may still have other flags such as backlogs or low placement readiness.")
 
     if "segment" in f.columns:
         st.divider()
