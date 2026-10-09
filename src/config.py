@@ -97,6 +97,32 @@ SEG_HIGH_PLACEMENT = 55      # placement readiness at or above this = ready
 SEG_LOW_LMS = 45             # score_lms below this (together with low engagement)
 SEG_LOW_ENGAGEMENT = 15      # score_engagement below this (together with low LMS)
 
+
+# What each segment means and what to do about it (the dashboard shows this text).
+# The keys must be exactly the names in SEGMENTS; a test checks that.
+SEGMENT_INFO = {
+    SEGMENTS[0]: {
+        "means": "Academic risk is High: low marks, backlogs, or both.",
+        "action": "Weekly mentor meetings, a backlog clearing plan, extra help for internal exams.",
+    },
+    SEGMENTS[1]: {
+        "means": f"Success Score {SEG_GOOD_MARKS}+ but placement readiness below {SEG_LOW_PLACEMENT}.",
+        "action": "Mock interviews, coding practice and aptitude practice.",
+    },
+    SEGMENTS[2]: {
+        "means": f"Success Score {SEG_HIGH_SUCCESS}+ and placement readiness {SEG_HIGH_PLACEMENT}+.",
+        "action": "Company drives, leadership roles, helping other students.",
+    },
+    SEGMENTS[3]: {
+        "means": f"Attendance below {THRESHOLD_ATTENDANCE}%, or low LMS use together with low engagement.",
+        "action": "Attendance counselling; encourage LMS use and joining clubs or events.",
+    },
+    SEGMENTS[4]: {
+        "means": "Does not fit any of the other four segments.",
+        "action": "Keep monitoring. Students here with a Medium or High risk still get their own recommended action.",
+    },
+}
+
 # ------------------------------------------------------------- scoring details
 BACKLOG_PENALTY = 20            # academic score loses this many points per backlog
 ATTENDANCE_RECENT_SHARE = 0.30  # share of the attendance score from the last 30 days

@@ -222,6 +222,13 @@ def test_risk_breakdown_handles_missing_values():
     assert (table["Points"] >= 0).all()
     assert "N/A (no data)" in table["Student value"].tolist()
 
+def test_segment_info_covers_every_segment():
+    """The dashboard shows SEGMENT_INFO, so it must describe exactly the real segments."""
+    assert list(config.SEGMENT_INFO) == list(config.SEGMENTS)
+    for name, info in config.SEGMENT_INFO.items():
+        assert info["means"].strip() and info["action"].strip(), f"empty text for {name}"
+    out = run_backend(load_input())
+    assert set(out["segment"]) <= set(config.SEGMENT_INFO)
 
 if __name__ == "__main__":
     failed = 0
