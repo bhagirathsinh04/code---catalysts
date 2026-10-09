@@ -705,7 +705,7 @@ if f.empty:
     st.stop()
 
 tab_overview, tab_explorer, tab_insights = st.tabs(
-    ["Campus Overview", "Student Explorer", "Insights & Interventions"]
+    ["Campus Overview", "Student Explorer", "Insights & Interventions", "Trends"]
 )
 
 # ---------------------------------------------------------------- tab 1
@@ -1148,6 +1148,41 @@ with tab_insights:
                                file_name="intervention_tracker.csv", mime="text/csv",
                                key="download_tracker")
         st.button("Clear tracker", on_click=clear_tracker)
+
+        # ---------------------------------------------------------------- tab 4
+with tab_trends:
+    st.subheader("Key trends")
+    if "semester" not in f.columns:
+        st.info("Semester is not in the data, so trends are hidden.")
+    else:
+        st.caption("Each semester is a different batch of students, so these charts "
+                   "compare groups. They do not follow one group over time.")
+        sem = (f.groupby(["semester", "department"])
+                 .agg(avg_score=("success_score", "mean"),
+                      high_risk=("risk_level", lambda s: (s == "High").mean() * 100))
+                 .reset_index())
+        t1, t2 = st.columns(2)
+        with t1:
+            fig = px.line(sem, x="semester", y="avg_score", color="department",
+                          markers=True, title="Average success score by semester")
+            fig.update_xaxes(type="category", title="Semester")
+            fig.update_yaxes(title="Avg success score")
+            show(fig)
+        with t2:
+            fig = px.bar(sem, x="semester", y="high_risk", color="department",
+                         barmode="group", title="High-risk share by semester (%)")
+            fig.update_xaxes(type="category", title="Semester")
+            fig.update_yaxes(title="% of students")
+            show(fig)
+
+        if {"attendance_pct", "last_30d_attendance_pct"}.issubset(f.columns):
+            fall = (f.assign(falling=(f["attendance_pct"] - f["last_30d_attendance_pct"]) >= FALLING_DROP)
+                      .groupby("semester")["falling"].mean().mul(100).reset_index())
+            fig = px.bar(fall, x="semester", y="falling", color_discrete_sequence=[PRIMARY],
+                         title=f"Students whose last-30-day attendance fell {FALLING_DROP}+ points (%)")
+            fig.update_xaxes(type="category", title="Semester")
+            fig.update_yaxes(title="% of students")
+            show(fig)
 
 st.divider()
 st.caption("Scores and risk flags are decision-support indicators based on synthetic demo "
