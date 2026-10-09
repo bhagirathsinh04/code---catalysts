@@ -639,7 +639,7 @@ st.caption("**How to use:** set filters in the sidebar. Campus Overview shows wh
            "Insights & Interventions groups students and exports lists.")
 
 # ---------------------------------------------------------------- sidebar
-st.sidebar.header("Filters")
+st.sidebar.header("Data Status")
 if source == "dummy":
     st.sidebar.warning("Showing DUMMY data. The real data and backend are not connected yet.")
     with st.sidebar.expander("Why is it dummy?"):
@@ -658,18 +658,37 @@ if source != "dummy":
                    "Check that each min and max looks right.")
         st.dataframe(df.select_dtypes("number").agg(["min", "max"]).T.round(1))
 
+# ---------------------------------------------------------------- filter bar
+FILTER_KEYS = ["flt_dept", "flt_year", "flt_risk", "flt_score"]
+
+
+def reset_filters():
+    for k in FILTER_KEYS:
+        st.session_state.pop(k, None)
+
+
 departments = sorted(df["department"].dropna().unique().tolist())
-sel_depts = st.sidebar.multiselect("Department", departments, default=departments)
+years = sorted(df["year"].dropna().unique().tolist()) if "year" in df.columns else []
 
-if "year" in df.columns:
-    years = sorted(df["year"].dropna().unique().tolist())
-    sel_years = st.sidebar.multiselect("Year", years, default=years)
-else:
-    sel_years = None
+with st.container(border=True):
+    head_l, head_r = st.columns([6, 1])
+    head_l.markdown("**🔎 Filter students** · pick nothing to include everyone")
+    head_r.button("Reset", on_click=reset_filters)
 
-sel_risk = st.sidebar.multiselect("Risk level", RISK_ORDER, default=RISK_ORDER)
-score_lo, score_hi = st.sidebar.slider("Success score range", 0, 100, (0, 100))
+    c1, c2 = st.columns(2)
+    sel_depts = c1.pills("Department", departments, selection_mode="multi",
+                         key="flt_dept") or departments
+    sel_risk = c2.pills("Risk level", RISK_ORDER, selection_mode="multi",
+                        key="flt_risk") or RISK_ORDER
 
+    c3, c4 = st.columns(2)
+    if years:
+        sel_years = c3.pills("Year", years, selection_mode="multi", key="flt_year",
+                             format_func=lambda y: f"Year {int(y)}") or years
+    else:
+        sel_years = None
+    score_lo, score_hi = c4.slider("Success score range", 0, 100, (0, 100),
+                                   key="flt_score")
 mask = (
     df["department"].isin(sel_depts)
     & df["risk_level"].isin(sel_risk)
@@ -678,6 +697,7 @@ mask = (
 if sel_years is not None:
     mask &= df["year"].isin(sel_years)
 f = df[mask]
+st.caption(f"Showing **{len(f)}** of {len(df)} students")
 
 if f.empty:
     st.info("No students match these filters. Try widening the filters in the sidebar.")
