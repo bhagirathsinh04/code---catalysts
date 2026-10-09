@@ -145,6 +145,43 @@ def test_one_changed_student_changes_score_the_right_way():
     assert new[0] < base[0]
 
 
+# 5 students whose scores were worked out by hand (see docs/scoring.md).
+HAND_CHECKED = ["MU24EC002", "MU25EC023", "MU23ME027", "MU23IT042", "MU23IT046"]
+
+
+def _by_hand(s, df):
+    """The method written out step by step, separate from the backend code."""
+    def cap(value, col):  # 95th-percentile student = 100
+        return min(value / np.percentile(df[col], config.COUNT_CAP_PERCENTILE * 100) * 100, 100)
+    share = config.ATTENDANCE_RECENT_SHARE
+    group = {
+        "academic": (s.cgpa * 10 + s.internal_avg
+                     + max(100 - config.BACKLOG_PENALTY * s.backlogs, 0)) / 3,
+        "attendance": (1 - share) * s.attendance_pct + share * s.last_30d_attendance_pct,
+        "lms": (s.assignment_completion + cap(s.login_count, "login_count")) / 2,
+        "engagement": np.mean([cap(s.events, "events"), cap(s.clubs_joined, "clubs_joined"),
+                               cap(s.hackathons, "hackathons"),
+                               cap(s.certifications, "certifications")]),
+        "skills": (s.technical_skill + s.soft_skill) / 2,
+        "feedback": (s.satisfaction + s.faculty_rating) / 2,
+    }
+    success = sum(config.WEIGHTS_SUCCESS[k] * group[k] for k in group)
+    ready = (s.aptitude + s.coding + s.mock_interview) / 3
+    return group, success, ready
+
+
+def test_hand_calculated_students_match():
+    df = load_input()
+    out = run_backend(df).set_index("student_id")
+    for sid in HAND_CHECKED:
+        s = out.loc[sid]
+        group, success, ready = _by_hand(s, df)
+        for k, v in group.items():
+            assert abs(s[f"score_{k}"] - v) < 0.06, f"{sid} {k}: {s[f'score_{k}']} vs {v:.2f}"
+        assert abs(s["success_score"] - success) < 0.06, sid
+        assert abs(s["placement_readiness"] - ready) < 0.06, sid
+
+
 if __name__ == "__main__":
     failed = 0
     tests = [(k, v) for k, v in sorted(globals().items()) if k.startswith("test_")]
