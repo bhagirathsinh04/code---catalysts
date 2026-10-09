@@ -17,6 +17,8 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from src.backend import risk_breakdown
+
 st.set_page_config(page_title="CampusPulse", page_icon="🎓", layout="wide")
 
 st.markdown("""
@@ -68,8 +70,11 @@ BACKLOG_PENALTY = _cfg("BACKLOG_PENALTY", 20)
 RISK_ORDER = ["Low", "Medium", "High"]
 RISK_COLORS = {"Low": "#2e9e5b", "Medium": "#f0a530", "High": "#d64545"}
 
-TABLE_COLUMNS = ["student_id", "name", "department", "year",
-                 "success_score", "placement_readiness", "risk_level", "segment"]
+TABLE_COLUMNS = ["student_id", "name", "department", "year", "success_score",
+                 "placement_readiness", "academic_risk", "placement_risk", "segment"]
+
+# name of the segment "good marks but low placement readiness" (from src/config.py)
+SEG_HIGH_LOW = _cfg("SEGMENTS", ["", "High marks, low placement readiness"])[1]
 
 # label -> (column, multiplier so everything is on a 0-100 scale)
 INDICATORS = {
@@ -251,36 +256,36 @@ def driver_sentence(table):
     return " ".join(parts) or "This student is close to the campus average on every component."
 
 
-def risk_table(row):
-    """Each risk rule: the student's value, the rule, and whether it was raised."""
-    rules = [
-        ("Success score", "success_score", "risk_low_success", "below", THRESHOLD_LOW_SUCCESS),
-        ("Attendance %", "attendance_pct", "risk_attendance", "below", THRESHOLD_ATTENDANCE),
-        ("Internal marks", "internal_avg", "risk_internal", "below", THRESHOLD_INTERNAL),
-        ("Backlogs", "backlogs", "risk_backlogs", "at least", THRESHOLD_BACKLOGS),
-        ("Placement readiness", "placement_readiness", "risk_placement", "below",
-         THRESHOLD_PLACEMENT_LOW),
-    ]
-    rows = []
-    for label, col, flag, direction, limit in rules:
-        value = row.get(col, np.nan)
-        if pd.isna(value):
-            shown, result = "N/A", "N/A (no data)"
-        else:
-            shown = f"{round(float(value), 1):g}"
-            if flag in row.index and not pd.isna(row[flag]):
-                raised = row[flag] == 1  # trust the backend's own flag
-            else:
-                raised = value < limit if direction == "below" else value >= limit
-            result = "FLAGGED" if raised else "OK"
-        rows.append({"Check": label, "Student value": shown,
-                     "Rule": f"flag if {direction} {limit}", "Result": result})
-    return pd.DataFrame(rows)
+def risk_hits(row, kind=None):
+    """The factors that added risk points for this student (from the backend)."""
+    table = risk_breakdown(row)
+    hits = table[table["Points"] > 0]
+    return hits if kind is None else hits[hits["Risk"] == kind]
 
 
-def color_result(value):
-    """Red cell for a raised risk flag in the 'Why the risk flags...' table."""
-    return "background-color: #fee2e2; color: #b91c1c; font-weight: 600" if value == "FLAGGED" else ""
+def why_text(row):
+    """One short line: which factors raised the academic and placement risk."""
+    hits = risk_hits(row)
+    parts = []
+    for kind in ("Academic", "Placement"):
+        names = hits.loc[hits["Risk"] == kind, "Factor"].tolist()
+        if names:
+            parts.append(f"{kind}: " + ", ".join(names))
+    return "; ".join(parts) or "No warning signs"
+
+
+def points_note(kind):
+    """How points turn into a level, e.g. 'Medium at 1+ points, High at 4+ points'."""
+    medium = _cfg("RISK_MEDIUM_POINTS", {"academic": 1, "placement": 2})[kind.lower()]
+    high = _cfg("RISK_HIGH_POINTS", {"academic": 4, "placement": 4})[kind.lower()]
+    return f"Medium at {medium}+ points, High at {high}+ points"
+
+
+def color_points(value):
+    """Red cell for a factor that added risk points."""
+    if isinstance(value, (int, float, np.integer, np.floating)) and value > 0:
+        return "background-color: #fee2e2; color: #b91c1c; font-weight: 600"
+    return ""
 
 
 def simulate(df, student_id, changes):
@@ -468,15 +473,14 @@ def student_summary(df, row, recommendation):
         meta.append(f"Segment: {row['segment']}")
     lines = [head, " | ".join(meta), ""]
 
-    n_flags = sum(row.get(c) == 1 for c in FLAG_LABELS)
     score = row.get("success_score", np.nan)
+    levels = f"Academic risk: {row['academic_risk']}. Placement risk: {row['placement_risk']}."
     if pd.isna(score):
-        lines.append(f"Success score: not available. Risk level: {row['risk_level']} "
-                     f"({n_flags} flag(s) raised).")
+        lines.append(f"Success score: not available. {levels}")
     else:
         gap = score - df["success_score"].mean()
         lines.append(f"Success score: {score:.1f} out of 100 ({gap:+.1f} vs campus average). "
-                     f"Risk level: {row['risk_level']} ({n_flags} flag(s) raised).")
+                       f"{levels}")
 
     drivers = driver_table(df, sid).dropna(subset=["This student", "Campus average"])
     if not drivers.empty:
@@ -490,13 +494,16 @@ def student_summary(df, row, recommendation):
         if drags.empty and best.empty:
             lines.append("- Close to the campus average on every component.")
 
-    lines += ["", "Risk flags raised:"]
-    flagged = risk_table(row)
-    flagged = flagged[flagged["Result"] == "FLAGGED"]
-    if flagged.empty:
-        lines.append("- None.")
-    for _, r in flagged.iterrows():
-        lines.append(f"- {r['Check']}: {r['Student value']} ({r['Rule']})")
+    lines += ["", "Why the risk levels are what they are:"]
+    for kind in ("Academic", "Placement"):
+          hits = risk_hits(row, kind)
+          level = row[f"{kind.lower()}_risk"]
+          if hits.empty:
+              lines.append(f"- {kind} risk {level}: no warning signs.")
+              continue
+          lines.append(f"- {kind} risk {level} ({int(hits['Points'].sum())} points):")
+          for _, r in hits.iterrows():
+              lines.append(f"    {r['Factor']}: {r['Student value']} ({r['Rule']}), {r['Points']} point(s)")
 
     if {"attendance_pct", "last_30d_attendance_pct"}.issubset(row.index):
         drop = row["attendance_pct"] - row["last_30d_attendance_pct"]
@@ -688,8 +695,7 @@ with tab_overview:
         urgent["_points"] = urgent[["academic_risk_points", "placement_risk_points"]].sum(axis=1)
         top = urgent.sort_values(["_order", "_points", "success_score"],
                                    ascending=[True, False, True]).head(10).copy()
-        top["why_flagged"] = top.apply(
-            lambda r: ", ".join(lbl for flag, lbl in FLAG_LABELS.items() if r.get(flag) == 1), axis=1)
+        top["why_flagged"] = top.apply(why_text, axis=1)
         top["recommended_action"] = top.apply(recommendation_for, axis=1)
         top_cols = [c for c in ["name", "student_id", "department", "success_score",
                                   "academic_risk", "placement_risk",
@@ -819,8 +825,7 @@ with tab_explorer:
         default_idx = 0
         if quick == "Good marks, low placement readiness":
             if "placement_readiness" in view.columns:
-                cand = view[(view["success_score"] >= 60)
-                            & (view["placement_readiness"] < THRESHOLD_PLACEMENT_LOW)]
+                cand = view[view["segment"] == SEG_HIGH_LOW]
                 cand = cand.sort_values("success_score", ascending=False)
             else:
                 cand = view.iloc[0:0]
@@ -846,22 +851,30 @@ with tab_explorer:
                 year_text = f" · {row['year']}"
         st.markdown(f"**{row['name']}** · {row['department']}{year_text}")
 
-        n_flags = sum(row.get(c) == 1 for c in FLAG_LABELS)
-        m1, m2, m3, m4 = st.columns(4)
+        breakdown = risk_breakdown(row)
+        points = breakdown.groupby("Risk")["Points"].sum()
+        m1, m2, m3, m4, m5 = st.columns(5)
         kpi(m1, "Success score", na(row["success_score"]), "#7c3aed", delta or "")
         kpi(m2, "Placement readiness",
             na(row["placement_readiness"]) if "placement_readiness" in row.index else "N/A",
             "#0d9488", "aptitude, coding, mock interview")
-        kpi(m3, "Risk level", str(row["risk_level"]),
-            RISK_COLORS.get(str(row["risk_level"]), "#64748b"), f"{n_flags} risk flag(s) raised")
-        kpi(m4, "Segment", str(row["segment"]) if "segment" in row.index else "N/A",
+        kpi(m3, "Academic risk", str(row["academic_risk"]),
+            RISK_COLORS.get(str(row["academic_risk"]), "#64748b"),
+            f"{int(points.get('Academic', 0))} risk points")
+        kpi(m4, "Placement risk", str(row["placement_risk"]),
+            RISK_COLORS.get(str(row["placement_risk"]), "#64748b"),
+            f"{int(points.get('Placement', 0))} risk points")
+        kpi(m5, "Segment", str(row["segment"]) if "segment" in row.index else "N/A",
             PRIMARY, "group for targeted action", small=True)
 
-        raised = [label for flag, label in FLAG_LABELS.items() if row.get(flag) == 1]
-        if raised:
-            st.warning("Why flagged: " + ", ".join(raised))
-        else:
-            st.success("No risk flags for this student.")
+        for kind in ("Academic", "Placement"):
+            level = str(row[f"{kind.lower()}_risk"])
+            names = breakdown.loc[(breakdown["Risk"] == kind) & (breakdown["Points"] > 0),
+                                  "Factor"].tolist()
+            text = f"{kind} risk is {level}. " + (
+                "Warning signs: " + ", ".join(names) + "." if names else "No warning signs.")
+            (st.success if level == "Low" else st.warning)(text)
+
         st.info(recommendation_for(row))
 
         filled = int(np.nan_to_num(row.get("missing_fields", 0)))
@@ -904,13 +917,18 @@ with tab_explorer:
             st.caption("Move a slider to see the effect.")
         else:
             new = simulate(df, chosen, changes)
-            s1, s2, s3 = st.columns(3)
+            s1, s2, s3, s4 = st.columns(4)
             kpi(s1, "Simulated success score", na(new["success_score"]), "#7c3aed",
                 f"{new['success_score'] - row['success_score']:+.1f} vs now")
             kpi(s2, "Simulated placement readiness", na(new["placement_readiness"]), "#0d9488",
                 f"{new['placement_readiness'] - row['placement_readiness']:+.1f} vs now")
-            kpi(s3, "Simulated risk level", str(new["risk_level"]),
-                RISK_COLORS.get(str(new["risk_level"]), "#64748b"), f"now: {row['risk_level']}")
+            kpi(s3, "Simulated academic risk", str(new["academic_risk"]),
+                RISK_COLORS.get(str(new["academic_risk"]), "#64748b"),
+                f"now: {row['academic_risk']}")
+            kpi(s4, "Simulated placement risk", str(new["placement_risk"]),
+                RISK_COLORS.get(str(new["placement_risk"]), "#64748b"),
+                f"now: {row['placement_risk']}")
+            
             cleared = [lbl for flag, lbl in FLAG_LABELS.items()
                        if row.get(flag) == 1 and new.get(flag) != 1]
             added = [lbl for flag, lbl in FLAG_LABELS.items()
@@ -946,14 +964,15 @@ with tab_explorer:
                 st.caption("No data for: " + ", ".join(no_data)
                            + ". The other components are re-weighted to cover this.")
 
-            st.markdown("**Why the risk flags were raised or not**")
-            risk_view = risk_table(row)
-            apply_map = getattr(risk_view.style, "map", None) or risk_view.style.applymap
-            st.dataframe(apply_map(color_result, subset=["Result"]), hide_index=True,
-                         column_config={"Check": st.column_config.TextColumn(width="medium"),
-                                        "Student value": st.column_config.TextColumn(width="small"),
-                                        "Rule": st.column_config.TextColumn(width="medium"),
-                                        "Result": st.column_config.TextColumn(width="small")})
+            st.markdown("**Why the risk levels are what they are**")
+            st.caption("Each risk adds up points from its warning signs. The total decides the level.")
+            for kind in ("Academic", "Placement"):
+                part = breakdown[breakdown["Risk"] == kind].drop(columns="Risk")
+                st.caption(f"**{kind} risk: {int(part['Points'].sum())} points, so "
+                           f"{row[kind.lower() + '_risk']}** ({points_note(kind)})")
+                styler = part.style
+                apply_map = getattr(styler, "map", None) or styler.applymap
+                st.dataframe(apply_map(color_points, subset=["Points"]), hide_index=True)
 
         bars, missing_labels = [], []
         for label, (col, scale) in INDICATORS.items():
