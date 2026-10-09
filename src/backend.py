@@ -168,6 +168,78 @@ def assign_segments(df):
     return out
 
 
+def _num(row, name):
+    """A number from the row, or None if it is missing."""
+    value = row.get(name) if hasattr(row, "get") else None
+    return None if value is None or pd.isna(value) else float(value)
+
+
+# plain-English advice for the weakest placement test
+_PLACEMENT_TIPS = {
+    "aptitude": "aptitude and reasoning practice",
+    "coding": "coding practice",
+    "mock_interview": "mock interviews",
+}
+
+
 def get_recommendations(row):
-    """Return a short action text for one student (one row of the table)."""
-    raise NotImplementedError
+    """Return a short action text for one student (one row of the table).
+
+    Picks the student's biggest problems, most urgent first, and quotes their
+    own numbers. At most MAX_ACTIONS actions are shown.
+    """
+    key_fields = ("success_score", "attendance_pct", "internal_avg",
+                  "backlogs", "placement_readiness")
+    if all(_num(row, c) is None for c in key_fields):
+        return "Not enough data to make a recommendation. Check this student's records."
+
+    actions = []  # (urgency, text); a smaller urgency number is more urgent
+
+    backlogs = _num(row, "backlogs")
+    if backlogs is not None and backlogs >= config.THRESHOLD_BACKLOGS:
+        actions.append((1, f"Make a plan to clear {int(backlogs)} backlogs "
+                           "(they also block many campus placements)."))
+
+    success = _num(row, "success_score")
+    if row.get("academic_risk") == "High" and success is not None:
+        actions.append((2, f"Weekly mentor meetings (success score {success:.0f})."))
+
+    internal = _num(row, "internal_avg")
+    if internal is not None and internal < config.THRESHOLD_INTERNAL:
+        actions.append((3, f"Extra help for internal exams (average {internal:.0f}%)."))
+
+    attendance = _num(row, "attendance_pct")
+    recent = _num(row, "last_30d_attendance_pct")
+    if attendance is not None and attendance < config.THRESHOLD_ATTENDANCE:
+        text = f"Attendance counselling (attendance {attendance:.0f}%"
+        if recent is not None and recent < attendance - 10:
+            text += f", only {recent:.0f}% in the last 30 days"
+        actions.append((4, text + ")."))
+
+    ready = _num(row, "placement_readiness")
+    if ready is not None and (row.get("placement_risk") in ("High", "Medium")
+                              or ready < config.SEG_LOW_PLACEMENT):
+        tests = {c: _num(row, c) for c in config.PLACEMENT_COLUMNS}
+        tests = {c: v for c, v in tests.items() if v is not None}
+        weakest = min(tests, key=tests.get) if tests else None
+        text = f"Placement preparation (readiness {ready:.0f})"
+        if weakest:
+            text += f", start with {_PLACEMENT_TIPS.get(weakest, weakest)}"
+        urgency = 2 if row.get("placement_risk") == "High" else 5
+        actions.append((urgency, text + "."))
+
+    lms, engagement = _num(row, "score_lms"), _num(row, "score_engagement")
+    if lms is not None and engagement is not None \
+            and lms < config.SEG_LOW_LMS and engagement < config.SEG_LOW_ENGAGEMENT:
+        actions.append((6, "Encourage LMS use and joining a club or event."))
+
+    if not actions:
+        if row.get("segment") == config.SEGMENTS[2]:
+            return "On track and placement-ready. Encourage company drives or a leadership role."
+        return "On track. No action needed; keep monitoring."
+
+    actions.sort(key=lambda a: a[0])
+    texts = [t for _, t in actions[:config.MAX_ACTIONS]]
+    level = row.get("risk_level")
+    prefix = "High priority. " if level == "High" else ""
+    return prefix + " ".join(texts)

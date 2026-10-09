@@ -101,3 +101,6 @@ SEG_LOW_ENGAGEMENT = 15      # score_engagement below this (together with low LM
 BACKLOG_PENALTY = 20            # academic score loses this many points per backlog
 ATTENDANCE_RECENT_SHARE = 0.30  # share of the attendance score from the last 30 days
 COUNT_CAP_PERCENTILE = 0.95     # count indicators: this percentile student = 100
+
+# ------------------------------------------------------------- recommendations
+MAX_ACTIONS = 3                 # most actions shown per student
