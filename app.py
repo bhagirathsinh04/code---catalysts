@@ -1,14 +1,14 @@
-"""CampusPulse dashboard (M2 - Frontend).
+"""CampusPulse dashboard (frontend).
 
 This file only DISPLAYS data. Numbers come from:
-  src/loader.py   -> load_data()  (M3; src/db.py also works)
-  src/backend.py  -> compute_scores(), detect_risks(),
-                     assign_segments(), get_recommendations()   (M1)
-  (the explainable-score helpers and a built-in scoring fallback live in this file)
+  src/loader.py   -> load_data()   (cleans and joins the 8 CSV files)
+  src/backend.py  -> compute_scores(), detect_risks(), assign_segments(),
+                     get_recommendations(), risk_breakdown()
 
-Order of preference: real data + the backend, then clearly-labelled DUMMY data.
-scoring (labelled in the sidebar), then clearly-labelled DUMMY data.
+If the real data or the backend cannot be loaded, the app shows clearly labelled
+DUMMY data (see "Data Status" in the sidebar).
 """
+
 import html
 import importlib
 
@@ -75,6 +75,11 @@ TABLE_COLUMNS = ["student_id", "name", "department", "year", "success_score",
 
 # name of the segment "good marks but low placement readiness" (from src/config.py)
 SEG_HIGH_LOW = _cfg("SEGMENTS", ["", "High marks, low placement readiness"])[1]
+
+# all segment names in rule order, what each means, and one colour per segment
+SEGMENTS = _cfg("SEGMENTS", [SEG_HIGH_LOW])
+SEGMENT_INFO = _cfg("SEGMENT_INFO", {})
+SEG_COLORS = dict(zip(SEGMENTS, ["#d64545", "#f0a530", "#2e9e5b", "#7c3aed", "#94a3b8"]))
 
 # label -> (column, multiplier so everything is on a 0-100 scale)
 INDICATORS = {
@@ -154,48 +159,11 @@ def _mean_of(parts):
 
 
 def component_table(df):
-    """One 0-100 column per score component (NaN when no data exists for it)."""
+    """One 0-100 column per score component, read from the backend's score_<name> columns."""
     comps = pd.DataFrame(index=df.index)
     for name in WEIGHTS_SUCCESS:
-        ready = f"score_{name}"
-        if ready in df.columns:  # M1 already computed it
-            comps[name] = df[ready]
-            continue
-
-        parts = []
-        if name == "academic":
-            if "cgpa" in df.columns:
-                parts.append(df["cgpa"] * 10)
-            if "internal_avg" in df.columns:
-                parts.append(_to_100(df["internal_avg"]))
-            if "backlogs" in df.columns:  # 0 backlogs = 100, minus BACKLOG_PENALTY each
-                parts.append((100 - df["backlogs"] * BACKLOG_PENALTY).clip(0, 100))
-        elif name == "attendance":
-            if "attendance_pct" in df.columns:
-                parts.append(_to_100(df["attendance_pct"]))
-        elif name == "lms":
-            if "assignment_completion" in df.columns:
-                parts.append(_to_100(df["assignment_completion"]))
-            if "login_count" in df.columns:
-                parts.append(_pct_of_max(df["login_count"]))
-        elif name == "engagement":
-            if "events" in df.columns:
-                parts.append(_pct_of_max(df["events"]))
-            if "certifications" in df.columns:
-                parts.append(_pct_of_max(df["certifications"]))
-        elif name == "skills":
-            if "technical_skill" in df.columns:
-                parts.append(_to_100(df["technical_skill"]))
-            if "soft_skill" in df.columns:
-                parts.append(_to_100(df["soft_skill"]))
-        elif name == "feedback":
-            if "satisfaction" in df.columns:
-                parts.append(_to_100(df["satisfaction"]))
-
-        result = _mean_of(parts)
-        comps[name] = result if result is not None else np.nan
+        comps[name] = df.get(f"score_{name}", np.nan)
     return comps
-
 
 def contributions(df):
     """Points each component adds to the 0-100 Success Score.
@@ -572,6 +540,19 @@ def show(fig):
                       title_font_size=16)
     st.plotly_chart(fig)
 
+def segment_summary(frame):
+    """One row per segment (config order, 0 students allowed) with simple averages."""
+    order = list(SEGMENTS) + [s for s in frame["segment"].dropna().unique()
+                              if s not in SEGMENTS]
+    grouped = frame.groupby("segment")
+    out = pd.DataFrame({"students": grouped.size()})
+    for col in ("success_score", "placement_readiness"):
+        out[col] = grouped[col].mean() if col in frame.columns else np.nan
+    out = out.reindex(order).rename_axis("segment")
+    out["students"] = out["students"].fillna(0).astype(int)
+    out["share"] = out["students"] / max(len(frame), 1)
+    return out.reset_index()
+
 
 # ---------------------------------------------------------------- load
 df, source, load_error = load_dashboard_data()
@@ -592,8 +573,9 @@ st.markdown(
 )
 
 st.caption("**How to use:** set filters in the filter bar at the top. Campus Overview shows who needs help first. "
-           "Student Explorer opens one student, explains the score and lets you try what-if changes. "
-           "Insights & Interventions groups students and exports lists.")
+           "Student Explorer opens one student, explains the score and the two risks, and lets you try "
+           "what-if changes. Insights & Interventions groups students into segments and exports lists. "
+           "**Overall risk** means the higher of a student's academic risk and placement risk.")
 
 # ---------------------------------------------------------------- sidebar
 st.sidebar.header("Data Status")
@@ -715,7 +697,8 @@ with tab_overview:
         watch = watch.copy()
         watch["recommended_action"] = "Call the student this week and ask what changed."
         watch_cols = [c for c in ["name", "student_id", "department", "attendance_pct",
-                                  "last_30d_attendance_pct", "attendance_drop", "risk_level"]
+                                    "last_30d_attendance_pct", "attendance_drop",
+                                    "academic_risk", "placement_risk"]
                       if c in watch.columns]
         st.caption(f"{len(watch)} students attended {FALLING_DROP}+ points less in the last 30 days "
                    "than overall. Early warning only. This does not change any score. "
@@ -820,7 +803,7 @@ with tab_explorer:
         quick = st.radio(
             "Quick pick",
             ["Choose manually", "Good marks, low placement readiness", "Lowest success score"],
-            horizontal=True,
+                        index=2, horizontal=True,
         )
         default_idx = 0
         if quick == "Good marks, low placement readiness":
@@ -1010,8 +993,12 @@ with tab_explorer:
 with tab_insights:
     st.subheader("Insights")
     insights = []
-    high_n = int((f["risk_level"] == "High").sum())
-    insights.append(f"{high_n} of {len(f)} students ({high_n / len(f):.0%}) are high risk.")
+    acad_n = int((f["academic_risk"] == "High").sum())
+    place_n = int((f["placement_risk"] == "High").sum())
+    either_n = int((f["risk_level"] == "High").sum())
+    insights.append(f"{acad_n} students ({acad_n / len(f):.0%}) have High academic risk and "
+                    f"{place_n} ({place_n / len(f):.0%}) have High placement risk; "
+                    f"{either_n} are High in at least one of the two.")
 
     if "attendance_pct" in f.columns:
         low = f[f["attendance_pct"] < THRESHOLD_ATTENDANCE]["success_score"]
@@ -1026,29 +1013,31 @@ with tab_insights:
 
     share = (f.assign(is_high=f["risk_level"] == "High")
              .groupby("department")["is_high"].mean().sort_values(ascending=False))
-    insights.append(f"{share.index[0]} has the highest share of high-risk students "
+    insights.append(f"{share.index[0]} has the highest share of students at High overall risk "
                     f"({share.iloc[0]:.0%}).")
 
-    if "placement_readiness" in f.columns:
-        gap_n = int(((f["success_score"] >= 60)
-                     & (f["placement_readiness"] < THRESHOLD_PLACEMENT_LOW)).sum())
-        insights.append(f"{gap_n} students have good overall scores but low placement "
-                        "readiness. Mock interviews and coding practice can help them.")
+    if "segment" in f.columns:
+        gap_n = int((f["segment"] == SEG_HIGH_LOW).sum())
+        insights.append(f"{gap_n} students are in the segment \"{SEG_HIGH_LOW}\": good "
+                        "overall scores but low placement readiness. Mock interviews and "
+                        "coding practice can help them.")
 
-    if "missing_fields" in f.columns:
+    thin = 0
+    if "data_confidence" in f.columns:
+        thin = int((f["data_confidence"] == "Low").sum())
+    elif "missing_fields" in f.columns:
         thin = int((f["missing_fields"] >= 3).sum())
     if thin:
-        insights.append(f"{thin} students have 3 or more missing values filled with "
-        "estimates, so their scores are less certain.")
+        insights.append(f"{thin} students have low data confidence (3 or more values filled "
+                        "with estimates, or a whole source missing), so their scores are less certain.")
 
     for line in insights:
         st.markdown(f"- {line}")
 
             # ---- campus-level "what if we intervene" (display only, nothing is saved)
     st.divider()
-    st.subheader("What if we intervene?")
-    st.caption("Takes every high-risk student with low attendance in the current view and "
-               "imagines they reach the target below. The scores are recalculated on a copy. "
+    st.caption("Takes every student with High overall risk and low attendance in the current view "
+               "and imagines they reach the target below. The scores are recalculated on a copy. "
                "Nothing is saved.")
     target = st.slider("Target attendance %", int(THRESHOLD_ATTENDANCE), 100,
                        int(THRESHOLD_ATTENDANCE), key="campus_target")
@@ -1056,27 +1045,50 @@ with tab_insights:
     if result is None:
         st.caption("Attendance data is not available, so this box is hidden.")
     elif result["n"] == 0:
-        st.info("No high-risk students with low attendance in this view.")
+        st.info("No students with High overall risk and low attendance in this view.")
     else:
         i1, i2, i3 = st.columns(3)
-        kpi(i1, "Students targeted", result["n"], PRIMARY, "high risk + low attendance")
-        kpi(i2, "High-risk students", f"{result['high_before']} → {result['high_after']}",
+        kpi(i1, "Students targeted", result["n"], PRIMARY, "High overall risk + low attendance")
+        kpi(i2, "High overall risk", f"{result['high_before']} → {result['high_after']}",
             RISK_COLORS["High"], f"{result['freed']} would leave High")
         kpi(i3, "Avg success score gain", f"{result['score_gain']:+.1f}", "#7c3aed",
             "for the targeted students")
-        st.success(f"If the {result['n']} high-risk students with low attendance reach {target}%, "
-                   f"high-risk drops from {result['high_before']} to {result['high_after']}.")
-        st.caption("Fixing attendance removes one flag, so most of them move from High to Medium. "
-                   "They may still have other flags such as backlogs or low placement readiness.")
-
+        st.success(f"If the {result['n']} students with High overall risk and low attendance reach "
+                   f"{target}%, students at High overall risk drop from {result['high_before']} "
+                   f"to {result['high_after']}.")
+        st.caption(f"Only {result['freed']} of the {result['n']} leave High. Low attendance is just "
+                   "one warning sign: most of these students also have backlogs, low internal marks "
+                   "or low placement readiness, so attendance alone will not be enough.")
+        
     if "segment" in f.columns:
         st.divider()
         st.subheader("Student segments")
-        seg = (f["segment"].fillna("Unassigned").value_counts()
-               .rename_axis("segment").reset_index(name="students"))
-        fig = px.bar(seg, x="students", y="segment", orientation="h",
-                     color_discrete_sequence=[PRIMARY], title="Students per segment")
+        st.caption("Every student is in exactly one segment: the first rule they match decides it. "
+                   "Each segment has its own kind of help.")
+        seg = segment_summary(f)
+        for start in range(0, len(seg), 3):
+            cards = st.columns(3)
+            for col, (_, s) in zip(cards, seg.iloc[start:start + 3].iterrows()):
+                info = SEGMENT_INFO.get(s["segment"], {})
+                kpi(col, s["segment"], f"{s['students']} ({s['share']:.0%})",
+                    SEG_COLORS.get(s["segment"], PRIMARY), info.get("means", ""))
+        fig = px.bar(seg, x="students", y="segment", orientation="h", color="segment",
+                     color_discrete_map=SEG_COLORS, title="Students per segment")
+        fig.update_layout(showlegend=False, yaxis=dict(autorange="reversed"))
         show(fig)
+        
+        seg_table = pd.DataFrame({
+            "Segment": seg["segment"],
+            "Students": seg["students"],
+            "Avg success score": seg["success_score"],
+            "Avg placement readiness": seg["placement_readiness"],
+            "Recommended action": seg["segment"].map(
+                lambda name: SEGMENT_INFO.get(name, {}).get("action", "")),
+        })
+        st.dataframe(seg_table.style.format(precision=1, na_rep="N/A"), hide_index=True,
+                     column_config={"Recommended action": st.column_config.TextColumn(width="large")})
+        st.caption("Averages are for the students in the current filters. Under \"Students "
+                   "needing attention\" you can pick a segment to list its Medium and High risk students.")
 
     flag_cols = [c for c in FLAG_LABELS if c in f.columns]
     if flag_cols:
@@ -1106,7 +1118,8 @@ with tab_insights:
         need = need.sort_values("success_score").head(50).copy()
         need["recommended_action"] = need.apply(recommendation_for, axis=1)
         cols = [c for c in TABLE_COLUMNS if c in need.columns] + ["recommended_action"]
-        st.caption("Showing up to 50 students, lowest scores first")
+        st.caption("Students with Medium or High overall risk (the higher of academic and placement risk). "
+                   "Showing up to 50, lowest scores first.")
         st.dataframe(style_table(need[cols]), hide_index=True)
         st.download_button("Download this list (CSV)",
                            need[cols].to_csv(index=False).encode("utf-8"),
@@ -1133,9 +1146,10 @@ with tab_insights:
 
         for _, person in pool.iterrows():
             sid = person["student_id"]
-            why = ", ".join(lbl for flag, lbl in FLAG_LABELS.items() if person.get(flag) == 1)
+            why = why_text(person)
             a, b = st.columns([3, 2])
-            a.markdown(f"**{person['name']}** ({sid}) · {person['risk_level']} risk  \n{why}")
+            a.markdown(f"**{person['name']}** ({sid}) · Academic risk: {person['academic_risk']}, "
+                       f"Placement risk: {person['placement_risk']}  \n{why}")
             current = tracker.get(sid, "Not started")
             b.selectbox("Status", TRACK_STATUSES, index=TRACK_STATUSES.index(current),
                         key=f"track_{sid}", label_visibility="collapsed",
@@ -1173,7 +1187,7 @@ with tab_trends:
             show(fig)
         with t2:
             fig = px.bar(sem, x="semester", y="high_risk", color="department",
-                         barmode="group", title="High-risk share by semester (%)")
+                         barmode="group", title="Students at High overall risk, by semester (%)")
             fig.update_xaxes(type="category", title="Semester")
             fig.update_yaxes(title="% of students")
             show(fig)
