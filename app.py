@@ -21,7 +21,7 @@ st.set_page_config(page_title="CampusPulse", page_icon="🎓", layout="wide")
 
 st.markdown("""
 <style>
-.block-container {padding-top: 1.4rem; max-width: 1400px;}
+.block-container {padding-top: 1rem; max-width: 1200px;}
 .hero {background: linear-gradient(120deg, #1d4ed8 0%, #6d28d9 100%);
        border-radius: 16px; padding: 22px 28px; margin-bottom: 18px; color: #ffffff;}
 .hero-title {font-size: 2rem; font-weight: 800; line-height: 1.2;}
@@ -33,7 +33,7 @@ st.markdown("""
       border-radius: 12px; padding: 14px 16px; margin-bottom: 8px;
       box-shadow: 0 1px 3px rgba(15, 23, 42, 0.07);}
 .kpi-label {font-size: 0.82rem; color: #64748b; font-weight: 600;}
-.kpi-value {font-size: 1.9rem; font-weight: 800; color: #0f172a; line-height: 1.25;}
+.kpi-value {font-size: 1.5rem; font-weight: 800; color: #0f172a; line-height: 1.25;}
 .kpi-value.small {font-size: 1.05rem; line-height: 1.7; padding-top: 6px;}
 .kpi-sub {font-size: 0.78rem; color: #64748b; min-height: 1.1em;}
 .stTabs [data-baseweb="tab"] {font-weight: 600;}
@@ -609,6 +609,7 @@ def kpi(column, label, value, accent=PRIMARY, sub="", small=False):
 def show(fig):
     """Draw a chart with the same clean style everywhere."""
     fig.update_layout(template="plotly_white", legend_title_text="",
+                      height=340,
                       margin=dict(l=10, r=10, t=50, b=10),
                       font=dict(family="Segoe UI, Inter, sans-serif"),
                       title_font_size=16)
