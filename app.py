@@ -538,7 +538,7 @@ with tab_overview:
 
     with st.expander("How is the Success Score calculated?"):
         weights = pd.DataFrame({
-            "Component": [k.replace("_", " ").title() for k in WEIGHTS_SUCCESS],
+            "Component": [LABELS.get(k, k.title()) for k in WEIGHTS_SUCCESS],
             "Weight": [f"{v:.0%}" for v in WEIGHTS_SUCCESS.values()],
         })
         st.dataframe(weights, hide_index=True)
@@ -691,6 +691,7 @@ with tab_explorer:
             fig = px.bar(pd.DataFrame(bars), x="Indicator", y="Value", color="Who",
                          barmode="group", color_discrete_map=WHO_COLORS,
                          title="This student vs campus average")
+            fig.update_yaxes(range=[0, 100])
             show(fig)
         if missing_labels:
             st.caption("N/A (not available): " + ", ".join(missing_labels))
