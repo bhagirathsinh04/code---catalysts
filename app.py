@@ -101,7 +101,7 @@ FLAG_ACTIONS = {
     "risk_placement": "mock interviews and coding practice",
 }
 
-REQUIRED_COLUMNS = ["student_id", "name", "department", "success_score", "risk_level"]
+REQUIRED_COLUMNS = ["student_id", "name", "department", "success_score", "risk_level", "academic_risk", "placement_risk"]
 
 
 # ---------------------------------------------------------------- explainable score
@@ -411,8 +411,9 @@ def recommendation_for(row):
 def style_table(frame):
     styler = frame.style.format(precision=1, na_rep="N/A")
     apply_map = getattr(styler, "map", None) or styler.applymap  # pandas old/new
-    if "risk_level" in frame.columns:
-        styler = apply_map(color_risk, subset=["risk_level"])
+    risk_cols = [c for c in ("risk_level", "academic_risk", "placement_risk") if c in frame.columns]
+    if risk_cols:
+        styler = apply_map(color_risk, subset=risk_cols)
     return styler
 
 FALLING_DROP = 10  # points below overall attendance
@@ -604,7 +605,7 @@ if source != "dummy":
         st.dataframe(df.select_dtypes("number").agg(["min", "max"]).T.round(1))
 
 # ---------------------------------------------------------------- filter bar
-FILTER_KEYS = ["flt_dept", "flt_year", "flt_risk", "flt_score"]
+FILTER_KEYS = ["flt_dept", "flt_year", "flt_acad", "flt_place", "flt_score"]
 
 
 def reset_filters():
@@ -620,23 +621,27 @@ with st.container(border=True):
     head_l.markdown("**🔎 Filter students** · pick nothing to include everyone")
     head_r.button("Reset", on_click=reset_filters)
 
-    c1, c2 = st.columns(2)
-    sel_depts = c1.pills("Department", departments, selection_mode="multi",
-                         key="flt_dept") or departments
-    sel_risk = c2.pills("Risk level", RISK_ORDER, selection_mode="multi",
-                        key="flt_risk") or RISK_ORDER
+c1, c2 = st.columns(2)
+sel_depts = c1.pills("Department", departments, selection_mode="multi",
+                    key="flt_dept") or departments
+if years:
+    sel_years = c2.pills("Year", years, selection_mode="multi", key="flt_year",
+                        format_func=lambda y: f"Year {int(y)}") or years
+else:
+    sel_years = None
 
-    c3, c4 = st.columns(2)
-    if years:
-        sel_years = c3.pills("Year", years, selection_mode="multi", key="flt_year",
-                             format_func=lambda y: f"Year {int(y)}") or years
-    else:
-        sel_years = None
-    score_lo, score_hi = c4.slider("Success score range", 0, 100, (0, 100),
-                                   key="flt_score")
+c3, c4, c5 = st.columns(3)
+sel_acad = c3.pills("Academic risk", RISK_ORDER, selection_mode="multi",
+                    key="flt_acad") or RISK_ORDER
+sel_place = c4.pills("Placement risk", RISK_ORDER, selection_mode="multi",
+                    key="flt_place") or RISK_ORDER
+score_lo, score_hi = c5.slider("Success score range", 0, 100, (0, 100),
+                                key="flt_score")
+    
 mask = (
     df["department"].isin(sel_depts)
-    & df["risk_level"].isin(sel_risk)
+    & df["academic_risk"].isin(sel_acad)
+    & df["placement_risk"].isin(sel_place)
     & df["success_score"].between(score_lo, score_hi)
 )
 if sel_years is not None:
@@ -654,15 +659,24 @@ tab_overview, tab_explorer, tab_insights, tab_trends = st.tabs(
 
 # ---------------------------------------------------------------- tab 1
 with tab_overview: 
-    c1, c2, c3, c4 = st.columns(4)
-    high_n_view = int((f["risk_level"] == "High").sum())
+    c1, c2, c3, c4, c5 = st.columns(5)
+    n_view = len(f)
+    acad_high = int((f["academic_risk"] == "High").sum())
+    acad_med = int((f["academic_risk"] == "Medium").sum())
+    place_high = int((f["placement_risk"] == "High").sum())
+    place_med = int((f["placement_risk"] == "Medium").sum())
+    both_high = int(((f["academic_risk"] == "High") & (f["placement_risk"] == "High")).sum())
     placement_avg = f["placement_readiness"].mean() if "placement_readiness" in f.columns else np.nan
-    kpi(c1, "Total students", len(f), PRIMARY, f"of {len(df)} on campus")
+    kpi(c1, "Total students", n_view, PRIMARY, f"of {len(df)} on campus")
     kpi(c2, "Average success score", na(f["success_score"].mean()), "#7c3aed", "scale 0 to 100")
-    kpi(c3, "High-risk students", high_n_view, RISK_COLORS["High"],
-        f"{high_n_view / len(f):.0%} of this view")
-    kpi(c4, "Avg placement readiness", na(placement_avg), "#0d9488",
+    kpi(c3, "High academic risk", acad_high, RISK_COLORS["High"],
+        f"{acad_high / n_view:.0%} of view · {acad_med} Medium")
+    kpi(c4, "High placement risk", place_high, "#c2410c",
+        f"{place_high / n_view:.0%} of view · {place_med} Medium")
+    kpi(c5, "Avg placement readiness", na(placement_avg), "#0d9488",
         "aptitude, coding, mock interview")
+    st.caption(f"{both_high} students are High in both risks, {acad_high - both_high} only in "
+               f"academic risk, {place_high - both_high} only in placement risk.")
 
     # ---- who needs help first
     st.subheader("Top 10 students who need help first")
@@ -671,13 +685,17 @@ with tab_overview:
         st.success("No Medium or High risk students in this view.")
     else:
         urgent["_order"] = urgent["risk_level"].map({"High": 0, "Medium": 1})
-        top = urgent.sort_values(["_order", "success_score"]).head(10).copy()
+        urgent["_points"] = urgent[["academic_risk_points", "placement_risk_points"]].sum(axis=1)
+        top = urgent.sort_values(["_order", "_points", "success_score"],
+                                   ascending=[True, False, True]).head(10).copy()
         top["why_flagged"] = top.apply(
             lambda r: ", ".join(lbl for flag, lbl in FLAG_LABELS.items() if r.get(flag) == 1), axis=1)
         top["recommended_action"] = top.apply(recommendation_for, axis=1)
-        top_cols = [c for c in ["name", "student_id", "department", "success_score", "risk_level",
-                                "why_flagged", "recommended_action"] if c in top.columns]
-        st.caption("High risk first, then lowest success score. Follows the filter bar.")
+        top_cols = [c for c in ["name", "student_id", "department", "success_score",
+                                  "academic_risk", "placement_risk",
+                                  "why_flagged", "recommended_action"] if c in top.columns]
+        st.caption("High in either risk first, then the most warning signs, then the lowest "
+                     "success score. Follows the filter bar.")
         st.dataframe(style_table(top[top_cols]), hide_index=True)
 
         # ---- falling-attendance watchlist (display only, not part of any score)
@@ -742,11 +760,17 @@ with tab_overview:
                       annotation_position="top right")
                 show(fig)
     with right:
-        counts = f.groupby(["department", "risk_level"]).size().reset_index(name="students")
-        fig = px.bar(counts, x="department", y="students", color="risk_level",
-                     color_discrete_map=RISK_COLORS,
-                     category_orders={"risk_level": RISK_ORDER},
-                     title="Risk level by department")
+        both = f.melt(id_vars="department", value_vars=["academic_risk", "placement_risk"],
+                        var_name="risk_type", value_name="level")
+        both["risk_type"] = both["risk_type"].map({"academic_risk": "Academic risk",
+                                                     "placement_risk": "Placement risk"})
+        counts = both.groupby(["department", "risk_type", "level"]).size().reset_index(name="students")
+        fig = px.bar(counts, x="department", y="students", color="level", facet_col="risk_type",
+                       color_discrete_map=RISK_COLORS,
+                       category_orders={"level": RISK_ORDER},
+                       title="Academic and placement risk by department")
+        fig.for_each_annotation(lambda a: a.update(text=a.text.split("=")[-1]))
+        fig.update_xaxes(title_text="")
         show(fig)
 
     if "attendance_pct" in f.columns:
@@ -754,7 +778,7 @@ with tab_overview:
                          color_discrete_map=RISK_COLORS,
                          category_orders={"risk_level": RISK_ORDER},
                          hover_name="name",
-                         title="Attendance vs success score",
+                         title="Attendance vs success score (colour = worse of the two risks)",
                          labels={"attendance_pct": "Attendance %",
                                  "success_score": "Success score"})
         show(fig)
