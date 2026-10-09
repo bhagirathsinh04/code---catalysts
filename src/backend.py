@@ -63,6 +63,23 @@ def _group_scores(df):
 
     return {k: v for k, v in groups.items() if v is not None}
 
+def _data_confidence(df):
+    """High / Medium / Low: how much of a student's data is real, not filled in.
+
+    Low  = 3+ filled values, or a whole source (e.g. placement) has no record.
+    Medium = 2 filled values. High = 0 or 1.
+    """
+    if "missing_fields" not in df.columns:
+        return pd.Series("Unknown", index=df.index)
+    filled = df["missing_fields"].fillna(0)
+    has_cols = [c for c in df.columns if c.startswith("has_")]
+    source_missing = (~df[has_cols].fillna(True).astype(bool)).any(axis=1) \
+        if has_cols else pd.Series(False, index=df.index)
+    low = (filled >= config.CONFIDENCE_LOW_MISSING) | source_missing
+    medium = filled >= config.CONFIDENCE_MEDIUM_MISSING
+    return pd.Series(np.select([low, medium], ["Low", "Medium"], default="High"),
+                     index=df.index)
+
 
 def compute_scores(df):
     """Add score_<group>, success_score and placement_readiness columns."""
@@ -79,6 +96,7 @@ def compute_scores(df):
                             / available).round(1)
     place = [c for c in config.PLACEMENT_COLUMNS if c in out.columns]
     out["placement_readiness"] = out[place].mean(axis=1).round(1) if place else np.nan
+    out["data_confidence"] = _data_confidence(out)
     return out
 
 def _col(df, name):
@@ -193,6 +211,10 @@ def get_recommendations(row):
     if all(_num(row, c) is None for c in key_fields):
         return "Not enough data to make a recommendation. Check this student's records."
 
+    note = ""
+    if row.get("data_confidence") == "Low":
+        note = " Data is partly estimated; check this student's records first."
+
     actions = []  # (urgency, text); a smaller urgency number is more urgent
 
     backlogs = _num(row, "backlogs")
@@ -235,11 +257,12 @@ def get_recommendations(row):
 
     if not actions:
         if row.get("segment") == config.SEGMENTS[2]:
-            return "On track and placement-ready. Encourage company drives or a leadership role."
-        return "On track. No action needed; keep monitoring."
+            return ("On track and placement-ready. Encourage company drives "
+                "or a leadership role." + note)
+        return "On track. No action needed; keep monitoring." + note
 
     actions.sort(key=lambda a: a[0])
     texts = [t for _, t in actions[:config.MAX_ACTIONS]]
     level = row.get("risk_level")
     prefix = "High priority. " if level == "High" else ""
-    return prefix + " ".join(texts)
+    return prefix + " ".join(texts) + note

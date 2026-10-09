@@ -104,3 +104,28 @@ COUNT_CAP_PERCENTILE = 0.95     # count indicators: this percentile student = 10
 
 # ------------------------------------------------------------- recommendations
 MAX_ACTIONS = 3                 # most actions shown per student
+
+
+# ------------------------------------------------------------- data confidence
+# The loader fills missing values with the branch median and counts them in
+# missing_fields. Students with many filled values (or a whole source missing)
+# get a lower data confidence, because their scores are partly estimated.
+CONFIDENCE_LOW_MISSING = 3      # this many filled values (or more) -> Low
+CONFIDENCE_MEDIUM_MISSING = 2   # this many filled values -> Medium
+CONFIDENCE_LEVELS = ["High", "Medium", "Low"]
+
+# Column names in the loader's output -> names used by the dashboard and backend.
+COLUMN_RENAMES = {
+    "branch": "department",
+    "avg_internal_marks": "internal_avg",
+    "overall_attendance_pct": "attendance_pct",
+    "logins_per_week": "login_count",
+    "assignment_completion_pct": "assignment_completion",
+    "events_attended": "events",
+    "aptitude_score": "aptitude",
+    "coding_score": "coding",
+    "mock_interview_score": "mock_interview",
+    "technical_score": "technical_skill",
+    "softskill_score": "soft_skill",
+    "satisfaction_score": "satisfaction",
+}
