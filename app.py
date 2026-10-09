@@ -273,6 +273,27 @@ def risk_table(row):
     return pd.DataFrame(rows)
 
 
+def color_result(value):
+    """Red cell for a raised risk flag in the 'Why the risk flags...' table."""
+    return "background-color: #fee2e2; color: #b91c1c; font-weight: 600" if value == "FLAGGED" else ""
+
+
+def simulate(df, student_id, changes):
+    """Re-score ONE student with edited values (what-if). Nothing is saved.
+
+    The edited row is put back into the full table before scoring, so campus
+    maximums (logins, events...) stay the same and the numbers match the app.
+    """
+    sim = df.drop(columns=[c for c in df.columns if c.startswith("score_")]).copy()
+    idx = sim.index[sim["student_id"] == student_id][0]
+    for col, value in changes.items():
+        sim.loc[idx, col] = value
+    sim["success_score"] = overall_score(sim)
+    place = [c for c in PLACEMENT_COLUMNS if c in sim.columns]
+    sim["placement_readiness"] = sim[place].mean(axis=1).round(1) if place else np.nan
+    return add_risk_flags(sim).loc[idx]
+
+
 # ---------------------------------------------------------------- data
 def make_dummy_data(n=120):
     """Fake students with the same column names as the team contract."""
@@ -397,6 +418,15 @@ def load_dashboard_data():
         return make_dummy_data(), "dummy", repr(e)
 
 
+@st.cache_data
+def load_cleaning_log():
+    """The loader's list of cleaning steps (empty if there is none)."""
+    try:
+        return list(find_loader()(return_log=True)[1])
+    except Exception:  # e.g. dummy data, or a loader without return_log
+        return []
+
+
 # ---------------------------------------------------------------- helpers
 def na(value, digits=1):
     return "N/A" if pd.isna(value) else f"{value:.{digits}f}"
@@ -475,6 +505,10 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+st.caption("**How to use:** set filters in the sidebar. Campus Overview shows who needs help first. "
+           "Student Explorer opens one student, explains the score and lets you try what-if changes. "
+           "Insights & Interventions groups students and exports lists.")
+
 # ---------------------------------------------------------------- sidebar
 st.sidebar.header("Filters")
 if source == "dummy":
@@ -535,6 +569,35 @@ with tab_overview:
         f"{high_n_view / len(f):.0%} of this view")
     kpi(c4, "Avg placement readiness", na(placement_avg), "#0d9488",
         "aptitude, coding, mock interview")
+
+    # ---- who needs help first
+    st.subheader("Top 10 students who need help first")
+    urgent = f[f["risk_level"] != "Low"].copy()
+    if urgent.empty:
+        st.success("No Medium or High risk students in this view.")
+    else:
+        urgent["_order"] = urgent["risk_level"].map({"High": 0, "Medium": 1})
+        top = urgent.sort_values(["_order", "success_score"]).head(10).copy()
+        top["why_flagged"] = top.apply(
+            lambda r: ", ".join(lbl for flag, lbl in FLAG_LABELS.items() if r.get(flag) == 1), axis=1)
+        top["recommended_action"] = top.apply(recommendation_for, axis=1)
+        top_cols = [c for c in ["name", "student_id", "department", "success_score", "risk_level",
+                                "why_flagged", "recommended_action"] if c in top.columns]
+        st.caption("High risk first, then lowest success score. Follows the sidebar filters.")
+        st.dataframe(style_table(top[top_cols]), hide_index=True)
+
+    with st.expander("Data quality: how the data was cleaned"):
+        steps = load_cleaning_log() if source != "dummy" else []
+        if not steps:
+            st.caption("No cleaning log available (demo data or loader without a log).")
+        else:
+            fixes = [s for s in steps if not s.startswith(("Loaded", "Merged"))]
+            merged_line = next((s for s in steps if s.startswith("Merged")), "")
+            st.markdown(f"**{len(fixes)} cleaning steps** were applied before any score was calculated. "
+                        f"{merged_line}")
+            for s in fixes:
+                st.markdown(f"- {s}")
+            st.caption("Every fix is recorded by src/loader.py, so no value was changed silently.")
 
     with st.expander("How is the Success Score calculated?"):
         weights = pd.DataFrame({
@@ -651,6 +714,55 @@ with tab_explorer:
             st.success("No risk flags for this student.")
         st.info(recommendation_for(row))
 
+        # ---- what-if simulator
+        st.divider()
+        st.subheader("What-if simulator")
+        st.caption("Drag a slider to see how this student's scores and risk would change. "
+                   "Nothing is saved.")
+        sim_fields = [("attendance_pct", "Attendance %", 0.0, 100.0),
+                      ("coding", "Coding score", 0.0, 100.0),
+                      ("aptitude", "Aptitude score", 0.0, 100.0),
+                      ("mock_interview", "Mock interview score", 0.0, 100.0),
+                      ("internal_avg", "Internal marks", 0.0, 100.0),
+                      ("backlogs", "Backlogs", 0, 10)]
+        sim_fields = [x for x in sim_fields if x[0] in df.columns]
+        defaults, changes = {}, {}
+        slider_cols = st.columns(3)
+        for i, (col, label, lo, hi) in enumerate(sim_fields):
+            start = row[col] if not pd.isna(row[col]) else df[col].mean()
+            key = f"sim_{chosen}_{col}"
+            is_int = col == "backlogs"
+            start = int(round(start)) if is_int else float(start)
+            defaults[key] = start
+            value = slider_cols[i % 3].slider(label, lo, hi, start,
+                                              step=1 if is_int else 0.5, key=key)
+            if value != start:
+                changes[col] = value
+        st.button("Reset sliders", on_click=lambda d: st.session_state.update(d), args=(defaults,))
+
+        if not changes:
+            st.caption("Move a slider to see the effect.")
+        else:
+            new = simulate(df, chosen, changes)
+            s1, s2, s3 = st.columns(3)
+            kpi(s1, "Simulated success score", na(new["success_score"]), "#7c3aed",
+                f"{new['success_score'] - row['success_score']:+.1f} vs now")
+            kpi(s2, "Simulated placement readiness", na(new["placement_readiness"]), "#0d9488",
+                f"{new['placement_readiness'] - row['placement_readiness']:+.1f} vs now")
+            kpi(s3, "Simulated risk level", str(new["risk_level"]),
+                RISK_COLORS.get(str(new["risk_level"]), "#64748b"), f"now: {row['risk_level']}")
+            cleared = [lbl for flag, lbl in FLAG_LABELS.items()
+                       if row.get(flag) == 1 and new.get(flag) != 1]
+            added = [lbl for flag, lbl in FLAG_LABELS.items()
+                     if row.get(flag) != 1 and new.get(flag) == 1]
+            if cleared:
+                st.success("Flags cleared: " + ", ".join(cleared))
+            if added:
+                st.warning("New flags raised: " + ", ".join(added))
+            if new["segment"] != row["segment"]:
+                st.caption(f"Segment would change: {row['segment']} → {new['segment']}")
+            st.info("Suggested action then: " + recommendation_for(new))
+
         # ---- explainable score: what drives this student's score and flags
         st.divider()
         st.subheader("Why this score?")
@@ -675,7 +787,13 @@ with tab_explorer:
                            + ". The other components are re-weighted to cover this.")
 
             st.markdown("**Why the risk flags were raised or not**")
-            st.dataframe(risk_table(row), hide_index=True)
+            risk_view = risk_table(row)
+            apply_map = getattr(risk_view.style, "map", None) or risk_view.style.applymap
+            st.dataframe(apply_map(color_result, subset=["Result"]), hide_index=True,
+                         column_config={"Check": st.column_config.TextColumn(width="medium"),
+                                        "Student value": st.column_config.TextColumn(width="small"),
+                                        "Rule": st.column_config.TextColumn(width="medium"),
+                                        "Result": st.column_config.TextColumn(width="small")})
 
         bars, missing_labels = [], []
         for label, (col, scale) in INDICATORS.items():
