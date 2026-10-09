@@ -504,6 +504,64 @@ def campus_intervention(frame_all, view, target):
                       & (after.loc[hit, "risk_level"] != "High")).sum()),
     }
 
+def student_summary(df, row, recommendation):
+    """Plain-English, rule-based summary of one student (no ML). Returns text."""
+    sid = row["student_id"]
+    head = f"Student summary: {row.get('name', sid)} ({sid})"
+    meta = [str(row[c]) for c in ("department",) if c in row.index and not pd.isna(row[c])]
+    if "year" in row.index and not pd.isna(row["year"]):
+        try:
+            meta.append(f"Year {int(row['year'])}")
+        except (TypeError, ValueError):
+            meta.append(f"Year {row['year']}")
+    if "segment" in row.index and not pd.isna(row["segment"]):
+        meta.append(f"Segment: {row['segment']}")
+    lines = [head, " | ".join(meta), ""]
+
+    n_flags = sum(row.get(c) == 1 for c in FLAG_LABELS)
+    score = row.get("success_score", np.nan)
+    if pd.isna(score):
+        lines.append(f"Success score: not available. Risk level: {row['risk_level']} "
+                     f"({n_flags} flag(s) raised).")
+    else:
+        gap = score - df["success_score"].mean()
+        lines.append(f"Success score: {score:.1f} out of 100 ({gap:+.1f} vs campus average). "
+                     f"Risk level: {row['risk_level']} ({n_flags} flag(s) raised).")
+
+    drivers = driver_table(df, sid).dropna(subset=["This student", "Campus average"])
+    if not drivers.empty:
+        drags = drivers[drivers["Difference"] < -0.5].sort_values("Difference").head(2)
+        best = drivers[drivers["Difference"] > 0.5].sort_values("Difference", ascending=False).head(1)
+        lines += ["", "What drives the score:"]
+        for r in drags.itertuples():
+            lines.append(f"- Holding the score back: {r.Component} ({r.Difference:+.1f} points vs campus average)")
+        for r in best.itertuples():
+            lines.append(f"- Helping the score: {r.Component} ({r.Difference:+.1f} points vs campus average)")
+        if drags.empty and best.empty:
+            lines.append("- Close to the campus average on every component.")
+
+    lines += ["", "Risk flags raised:"]
+    flagged = risk_table(row)
+    flagged = flagged[flagged["Result"] == "FLAGGED"]
+    if flagged.empty:
+        lines.append("- None.")
+    for _, r in flagged.iterrows():
+        lines.append(f"- {r['Check']}: {r['Student value']} ({r['Rule']})")
+
+    if {"attendance_pct", "last_30d_attendance_pct"}.issubset(row.index):
+        drop = row["attendance_pct"] - row["last_30d_attendance_pct"]
+        if not pd.isna(drop) and drop >= FALLING_DROP:
+            lines += ["", f"Watch: attendance in the last 30 days ({row['last_30d_attendance_pct']:.1f}%) "
+                          f"is {drop:.1f} points below overall ({row['attendance_pct']:.1f}%)."]
+
+    advice = str(recommendation).strip()
+    if advice.startswith("Suggested: "):
+        advice = advice[len("Suggested: "):]
+    lines += ["", f"Recommended action: {advice}", "",
+              "This summary is a decision-support aid built from fixed rules. "
+              "It does not replace a teacher's judgement."]
+    return "\n".join(lines)
+
 
 PRIMARY = "#2563eb"
 MUTED = "#94a3b8"
@@ -879,6 +937,19 @@ with tab_explorer:
             show(fig)
         if missing_labels:
             st.caption("N/A (not available): " + ", ".join(missing_labels))
+
+        # ---- plain-English summary (rule-based, with download)
+        st.divider()
+        st.subheader("Plain-English summary")
+        summary_text = student_summary(df, row, recommendation_for(row))
+        with st.container(border=True):
+            st.markdown(summary_text.replace("\n", "  \n"))
+        st.download_button("Download this summary (.txt)",
+                           summary_text.encode("utf-8"),
+                           file_name=f"summary_{chosen}.txt", mime="text/plain",
+                           key=f"download_summary_{chosen}")
+        st.caption("To print it, download the .txt file and print from there, "
+                   "or use your browser's print (Ctrl+P).")
 
 # ---------------------------------------------------------------- tab 3
 with tab_insights:
