@@ -61,3 +61,8 @@ SEGMENTS = [
     "Academic support needed",
     "On track",
 ]
+
+# ------------------------------------------------------------- scoring details
+BACKLOG_PENALTY = 20            # academic score loses this many points per backlog
+ATTENDANCE_RECENT_SHARE = 0.30  # share of the attendance score from the last 30 days
+COUNT_CAP_PERCENTILE = 0.95     # count indicators: this percentile student = 100

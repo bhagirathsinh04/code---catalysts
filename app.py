@@ -206,8 +206,12 @@ def contributions(df):
 
 
 def overall_score(df):
-    """Success Score on a 0-100 scale (used for the dummy data)."""
-    return contributions(df).sum(axis=1, min_count=1).round(1)
+    """Success Score: uses src/backend.py when ready, else the old built-in rule."""
+    try:
+        from src.backend import compute_scores
+        return compute_scores(df)["success_score"]
+    except (ImportError, NotImplementedError):
+        return contributions(df).sum(axis=1, min_count=1).round(1)
 
 
 # ---------------------------------------------------------------- per student
@@ -355,11 +359,15 @@ def add_risk_flags(df):
 
 
 def built_in_backend(df):
-    """Scores, flags and segments from src/config.py (used until src/backend.py works)."""
+    """Scores from src/backend.py when ready; risk flags and segments from this file."""
     df = df.copy().reset_index(drop=True)
-    df["success_score"] = overall_score(df)
-    place = [c for c in PLACEMENT_COLUMNS if c in df.columns]
-    df["placement_readiness"] = df[place].mean(axis=1).round(1) if place else np.nan
+    try:
+        from src.backend import compute_scores
+        df = compute_scores(df)
+    except (ImportError, NotImplementedError):
+        df["success_score"] = overall_score(df)
+        place = [c for c in PLACEMENT_COLUMNS if c in df.columns]
+        df["placement_readiness"] = df[place].mean(axis=1).round(1) if place else np.nan
     return add_risk_flags(df)
 
 
