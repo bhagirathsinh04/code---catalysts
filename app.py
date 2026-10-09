@@ -459,6 +459,20 @@ def style_table(frame):
         styler = apply_map(color_risk, subset=["risk_level"])
     return styler
 
+FALLING_DROP = 10  # points below overall attendance
+
+
+def falling_attendance(frame, drop=FALLING_DROP):
+    """Students whose last-30-day attendance is `drop`+ points below overall.
+    Display only: not used in any score. Returns None if the columns are missing."""
+    needed = {"attendance_pct", "last_30d_attendance_pct"}
+    if not needed.issubset(frame.columns):
+        return None
+    out = frame.copy()
+    out["attendance_drop"] = (out["attendance_pct"] - out["last_30d_attendance_pct"]).round(1)
+    out = out[out["attendance_drop"] >= drop]
+    return out.sort_values("attendance_drop", ascending=False)
+
 
 PRIMARY = "#2563eb"
 MUTED = "#94a3b8"
@@ -585,6 +599,27 @@ with tab_overview:
                                 "why_flagged", "recommended_action"] if c in top.columns]
         st.caption("High risk first, then lowest success score. Follows the sidebar filters.")
         st.dataframe(style_table(top[top_cols]), hide_index=True)
+
+        # ---- falling-attendance watchlist (display only, not part of any score)
+    st.subheader("Falling attendance watchlist")
+    watch = falling_attendance(f)
+    if watch is None:
+        st.caption("Last-30-day attendance is not in the data, so this list is hidden.")
+    elif watch.empty:
+        st.success(f"No student's last-30-day attendance is {FALLING_DROP}+ points below their overall attendance.")
+    else:
+        watch = watch.copy()
+        watch["recommended_action"] = "Call the student this week and ask what changed."
+        watch_cols = [c for c in ["name", "student_id", "department", "attendance_pct",
+                                  "last_30d_attendance_pct", "attendance_drop", "risk_level"]
+                      if c in watch.columns]
+        st.caption(f"{len(watch)} students attended {FALLING_DROP}+ points less in the last 30 days "
+                   "than overall. Early warning only. This does not change any score. "
+                   "Follows the sidebar filters.")
+        st.dataframe(style_table(watch[watch_cols].head(15)), hide_index=True)
+        st.download_button("Download watchlist (CSV)",
+                           watch[watch_cols].to_csv(index=False).encode("utf-8"),
+                           file_name="falling_attendance.csv", mime="text/csv")
 
     with st.expander("Data quality: how the data was cleaned"):
         steps = load_cleaning_log() if source != "dummy" else []
