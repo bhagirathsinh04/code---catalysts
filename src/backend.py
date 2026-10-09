@@ -266,3 +266,60 @@ def get_recommendations(row):
     level = row.get("risk_level")
     prefix = "High priority. " if level == "High" else ""
     return prefix + " ".join(texts) + note
+
+def risk_breakdown(row):
+    """Explain one student's two risk levels, factor by factor.
+
+    Returns a table (DataFrame) with one line per factor and the columns
+    Risk, Factor, Student value, Rule, Points, Max points. The Points of the
+    academic lines add up to academic_risk_points, and the placement lines to
+    placement_risk_points. It uses the same numbers from config as
+    detect_risks(), and a test checks that the two always agree.
+    """
+    p, q = config.ACADEMIC_RISK_POINTS, config.PLACEMENT_RISK_POINTS
+    lines = []
+
+    def add(risk, factor, column, earned, rule, max_points):
+        value = _num(row, column)
+        if value is None:
+            lines.append((risk, factor, "N/A (no data)", rule, 0, max_points))
+        else:
+            lines.append((risk, factor, f"{round(value, 1):g}", rule,
+                          earned(value), max_points))
+
+    add("Academic", "Low success score", "success_score",
+        lambda v: p["low_success"] * (v < config.THRESHOLD_LOW_SUCCESS),
+        f"below {config.THRESHOLD_LOW_SUCCESS}", p["low_success"])
+    add("Academic", "Low internal marks", "internal_avg",
+        lambda v: p["low_internal"] * (v < config.THRESHOLD_INTERNAL),
+        f"below {config.THRESHOLD_INTERNAL}", p["low_internal"])
+    add("Academic", "Backlogs", "backlogs",
+        lambda v: p["backlogs"] * (v >= config.THRESHOLD_BACKLOGS),
+        f"{config.THRESHOLD_BACKLOGS} or more", p["backlogs"])
+    add("Academic", "Low attendance", "attendance_pct",
+        lambda v: p["low_attendance"] * (v < config.THRESHOLD_ATTENDANCE),
+        f"below {config.THRESHOLD_ATTENDANCE}", p["low_attendance"])
+    add("Academic", "Low CGPA", "cgpa",
+        lambda v: p["low_cgpa"] * (v < config.CGPA_WEAK),
+        f"below {config.CGPA_WEAK}", p["low_cgpa"])
+
+    add("Placement", "Low placement readiness", "placement_readiness",
+        lambda v: (q["readiness_very_low"] if v < config.PLACEMENT_VERY_LOW
+                   else q["readiness_low"] if v < config.PLACEMENT_LOW else 0),
+        f"below {config.PLACEMENT_VERY_LOW} = {q['readiness_very_low']} points, "
+        f"below {config.PLACEMENT_LOW} = {q['readiness_low']} points",
+        q["readiness_very_low"])
+    add("Placement", "Backlogs", "backlogs",
+        lambda v: q["backlogs"] * (v >= config.THRESHOLD_BACKLOGS),
+        f"{config.THRESHOLD_BACKLOGS} or more", q["backlogs"])
+    add("Placement", "CGPA under the usual cut-off", "cgpa",
+        lambda v: q["low_cgpa"] * (v < config.CGPA_ELIGIBLE),
+        f"below {config.CGPA_ELIGIBLE}", q["low_cgpa"])
+    add("Placement", "Weak technical skill", "technical_skill",
+        lambda v: q["weak_technical"] * (v < config.TECHNICAL_WEAK),
+        f"below {config.TECHNICAL_WEAK}", q["weak_technical"])
+
+    table = pd.DataFrame(lines, columns=["Risk", "Factor", "Student value", "Rule",
+                                         "Points", "Max points"])
+    table["Points"] = table["Points"].astype(int)
+    return table

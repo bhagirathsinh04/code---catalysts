@@ -16,7 +16,7 @@ import pandas as pd
 from src import config
 from src.loader import load_data
 from src.backend import (compute_scores, detect_risks, assign_segments,
-                         get_recommendations)
+                         get_recommendations, risk_breakdown)
 
 SCORE_COLUMNS = ["success_score", "placement_readiness", "score_academic",
                  "score_attendance", "score_lms", "score_engagement",
@@ -198,6 +198,29 @@ def test_scoring_doc_matches_config():
         assert line in doc, f"docs/scoring.md is out of date for {name}: expected {line!r}"
     for segment in config.SEGMENTS:
         assert segment in doc, f"segment missing from the doc: {segment}"
+
+
+def test_risk_breakdown_adds_up_to_the_stored_points():
+    out = run_backend(load_input())
+    medium, high = config.RISK_MEDIUM_POINTS, config.RISK_HIGH_POINTS
+    for _, row in out.iterrows():
+        table = risk_breakdown(row)
+        for kind, points_col, level_col in (("Academic", "academic_risk_points", "academic_risk"),
+                                            ("Placement", "placement_risk_points", "placement_risk")):
+            total = int(table.loc[table["Risk"] == kind, "Points"].sum())
+            assert total == row[points_col], f"{row['student_id']}: {kind} points differ"
+            level = "High" if total >= high[kind.lower()] else \
+                    "Medium" if total >= medium[kind.lower()] else "Low"
+            assert level == row[level_col], f"{row['student_id']}: {kind} level differs"
+
+
+def test_risk_breakdown_handles_missing_values():
+    row = run_backend(load_input()).iloc[0].copy()
+    row["technical_skill"] = np.nan
+    row["cgpa"] = np.nan
+    table = risk_breakdown(row)
+    assert (table["Points"] >= 0).all()
+    assert "N/A (no data)" in table["Student value"].tolist()
 
 
 if __name__ == "__main__":
